@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+database/*.sqlite
+database/*.db
+
+data/raid_attackers_seed.csv
+data/playwright-profile/

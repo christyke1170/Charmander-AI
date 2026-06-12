@@ -1,0 +1,10 @@
+source,ranking_scope,pokemon_name,form,pokemon_type,rank,fast_move,charged_move,score,dps,tdo,summary,url,scraped_at
+example_not_current_meta,overall,Example Mega Rayquaza,,dragon,1,Dragon Tail,Dragon Ascent,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers,
+example_not_current_meta,overall,Example Primal Groudon,,ground,2,Mud Shot,Precipice Blades,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers,
+example_not_current_meta,overall,Example Primal Kyogre,,water,3,Waterfall,Origin Pulse,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers,
+example_not_current_meta,type:fire,Example Mega Blaziken,,fire,1,Fire Spin,Blast Burn,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers/fire,
+example_not_current_meta,type:fire,Example Reshiram,,fire,2,Fire Fang,Fusion Flare,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers/fire,
+example_not_current_meta,type:fire,Example Shadow Chandelure,Shadow,fire,3,Fire Spin,Overheat,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers/fire,
+example_not_current_meta,type:water,Example Primal Kyogre,,water,1,Waterfall,Origin Pulse,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers/water,
+example_not_current_meta,type:water,Example Mega Swampert,,water,2,Water Gun,Hydro Cannon,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers/water,
+example_not_current_meta,type:water,Example Shadow Kyogre,Shadow,water,3,Waterfall,Surf,example,example,example,Example only - not guaranteed current meta truth.,https://example.invalid/raid-attackers/water,
