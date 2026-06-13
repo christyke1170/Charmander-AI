@@ -2,7 +2,7 @@
 
 A local-first Pokémon GO Discord bot that gathers event/news information from public sources, stores it in SQLite, and lets Discord users query the local database with slash commands.
 
-The bot keeps event data, Pokémon knowledge, raid attacker rankings, and LeekDuck egg pools in SQLite. Owner commands and background refresh jobs update those caches, while user-facing commands answer quickly from local data.
+The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gigantamax attacker rankings, and LeekDuck egg pools in SQLite. Owner commands and background refresh jobs update those caches, while user-facing commands answer quickly from local data.
 
 ## Features
 
@@ -12,6 +12,7 @@ The bot keeps event data, Pokémon knowledge, raid attacker rankings, and LeekDu
 - Stores events locally in `database/pogo_events.sqlite`
 - Stores Pokémon-specific Pokémon GO Hub DB knowledge in a separate `pokemon_knowledge` SQLite table
 - Stores raid attacker ranking rows in a separate `raid_attacker_rankings` SQLite table, with freshness timestamps in `cache_metadata`
+- Stores Dynamax/Gigantamax attacker ranking rows in a separate `dynamax_attackers` SQLite table, with freshness timestamps in `cache_metadata`
 - Stores LeekDuck egg pool rows in a separate `egg_pools` SQLite table, with freshness timestamps in `cache_metadata`
 - Deduplicates events with `UNIQUE(source, title, start_time)`
 - Discord slash commands:
@@ -21,11 +22,13 @@ The bot keeps event data, Pokémon knowledge, raid attacker rankings, and LeekDu
   - `/communityday` — Community Day related events
   - `/ask` — OpenAI RAG answer when configured, local keyword fallback otherwise
   - `/raidattackers query:` — ask about cached monthly raid attacker rankings/data
+  - `/dynamax query:` — ask about cached monthly Dynamax/Gigantamax attacker rankings/data
   - `/eggs query:` — ask about cached current egg pools, distances, Adventure Sync/Route Gift pools, or Pokémon hatch availability
   - `/pokemon query:` — ask about cached Pokémon GO Hub Pokémon knowledge
   - `/update` — owner-only manual update
   - `/updatepokemon` — owner-only manual Pokémon GO Hub DB cache update
   - `/updateraidattackers` — owner-only manual raid attacker cache refresh
+  - `/updatedynamax` — owner-only manual Dynamax/Gigantamax attacker cache refresh
   - `/updateeggs` — owner-only manual LeekDuck egg pool cache refresh
   - `/importpokemon` — owner-only local CSV/JSON Pokémon knowledge import fallback
 - Mention-based local Q&A, such as `@Pokemon GO AI Bot what raids are active?`
@@ -94,6 +97,9 @@ POKEMON_DB_SCRAPE_LIMIT=50
 RAID_ATTACKER_CACHE_MAX_AGE_DAYS=30
 RAID_ATTACKER_AUTO_UPDATE=true
 RAID_ATTACKER_AUTO_UPDATE_CHECK_HOURS=24
+DYNAMAX_CACHE_MAX_AGE_DAYS=30
+DYNAMAX_AUTO_UPDATE=true
+DYNAMAX_AUTO_UPDATE_CHECK_HOURS=24
 EGG_CACHE_MAX_AGE_DAYS=30
 EGG_AUTO_UPDATE=true
 EGG_AUTO_UPDATE_CHECK_HOURS=24
@@ -102,11 +108,16 @@ RAID_ATTACKER_BROWSER_HEADLESS=true
 RAID_ATTACKER_BROWSER_TIMEOUT_SECONDS=45
 RAID_ATTACKER_BROWSER_SLOW_MO_MS=0
 RAID_ATTACKER_BROWSER_PROFILE_DIR=
+DYNAMAX_USE_BROWSER_SCRAPER=true
+DYNAMAX_BROWSER_HEADLESS=false
+DYNAMAX_BROWSER_TIMEOUT_SECONDS=60
+DYNAMAX_BROWSER_SLOW_MO_MS=50
+DYNAMAX_BROWSER_PROFILE_DIR=data/playwright-dynamax-profile
 ```
 
 To get your Discord user ID, enable Developer Mode in Discord, right-click your user, and choose **Copy User ID**.
 
-Raid attacker and egg auto-refresh settings control cache age and check frequency. SQLite `cache_metadata.last_updated` stores the actual successful update timestamps.
+Raid attacker, Dynamax attacker, and egg auto-refresh settings control cache age and check frequency. SQLite `cache_metadata.last_updated` stores the actual successful update timestamps.
 
 ## Run the manual weekly update
 
@@ -151,6 +162,116 @@ If an automatic refresh is already running, `/updateraidattackers` returns a fri
 3. Local CSV/JSON seed import with example-data safety checks enabled.
 
 The owner-only `/updateraidattackers` command and the monthly background cache refresh handle live raid attacker updates. User-facing commands use cached ranking rows.
+
+## Dynamax/Gigantamax attacker cache auto-update behavior
+
+Dynamax and Gigantamax attacker rankings are cached separately from normal raid attacker rankings in SQLite table `dynamax_attackers`. The source is Pokémon GO Hub’s Dynamax attacker page:
+
+```text
+https://db.pokemongohub.net/best/dynamax-attackers-per-type
+```
+
+Type sections use hash anchors such as `#fire` and `#fighting`, and cached rows store source URLs like `https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire`.
+
+The cache is considered stale after `DYNAMAX_CACHE_MAX_AGE_DAYS` days, defaulting to 30. The bot stores the successful refresh timestamp in SQLite `cache_metadata` under cache name `dynamax_attackers`. On startup, the bot initializes `dynamax_attackers`, checks freshness, and starts a background refresh when `DYNAMAX_AUTO_UPDATE=true`. A recurring background task checks every `DYNAMAX_AUTO_UPDATE_CHECK_HOURS` hours. An update lock prevents overlapping refreshes.
+
+Normal user questions never scrape live. `/dynamax`, `/ask`, `/pokemon`, and @mention queries answer only from cached SQLite rows. Queries containing `dynamax`, `gigantamax`, `dmax`, `gmax`, or `max battle` route to Dynamax rankings before normal raid attacker rankings.
+
+Examples:
+
+```text
+/dynamax
+/dynamax fire
+/dynamax fighting
+/dynamax best fire attackers
+/dynamax top 10 gmax attackers
+@Pokemon GO AI Bot best fire dynamax attackers
+@Pokemon GO AI Bot best dmax pokemon
+```
+
+Owners can force a refresh with:
+
+```text
+/updatedynamax
+```
+
+Run the updater manually with:
+
+```bash
+python dynamax_update.py
+```
+
+`dynamax_update.py` tries static `requests` + BeautifulSoup first. If the page is blocked or produces zero rows, it can use a Dynamax-specific Playwright Chromium browser configuration. Install browser support with `python -m playwright install chromium` if required. If the scraper returns zero rows or is blocked, existing cached rows are kept and `cache_metadata.last_updated` is not marked fresh.
+
+### Dynamax persistent browser profile for Cloudflare
+
+Pokémon GO Hub may show Cloudflare security verification to automated browsers. Dynamax scraping can use a persistent headed Playwright profile so the owner can solve Cloudflare once and reuse that browser session for future owner-run updates.
+
+Recommended local `.env` settings:
+
+```env
+DYNAMAX_USE_BROWSER_SCRAPER=true
+DYNAMAX_BROWSER_HEADLESS=false
+DYNAMAX_BROWSER_TIMEOUT_SECONDS=60
+DYNAMAX_BROWSER_SLOW_MO_MS=50
+DYNAMAX_BROWSER_PROFILE_DIR=data/playwright-dynamax-profile
+```
+
+The profile directory is ignored by git. Normal Discord questions still never scrape live; only owner/background update paths use the live scraper.
+
+To debug and manually solve Cloudflare:
+
+```powershell
+.\.venv\Scripts\python.exe debug_dynamax_scrape.py --pause
+```
+
+If Cloudflare appears, solve it in the opened browser, then press Enter in the terminal. The script saves `debug/dynamax_page.html`, `debug/dynamax_page.txt`, and `debug/dynamax_screenshot.png`, then prints whether type names/table-like rows were visible.
+
+After the browser profile has a valid session, run:
+
+```powershell
+.\.venv\Scripts\python.exe dynamax_update.py --pause-browser
+```
+
+If rows parse successfully, SQLite and cache metadata are updated. If rows are still zero, `dynamax_update.py` falls back to `data/dynamax_attackers.csv` as before.
+
+### Dynamax manual CSV fallback
+
+Pokémon GO Hub live scraping may be blocked by anti-bot protection. When that happens, you can manually maintain a local CSV fallback. Normal Discord questions still use SQLite only and never read/scrape live pages.
+
+1. Copy or create the local CSV:
+
+   ```bash
+   copy data\dynamax_attackers.example.csv data\dynamax_attackers.csv
+   ```
+
+2. Replace the example row with real current rankings. The production CSV is ignored by git at `data/dynamax_attackers.csv`.
+
+Required columns:
+
+```csv
+ranking_scope,pokemon_type,rank,pokemon_name,form,fast_move,charged_move,score,dps,tdo,summary,url
+```
+
+Example real row shape:
+
+```csv
+type:fire,fire,1,Charizard,,Fire Spin,Max Flare,28.04,31.98,700,Top cached Fire-type Dynamax attacker.,https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire
+```
+
+Import the CSV directly with:
+
+```bash
+python dynamax_import.py
+```
+
+Or run the update script, which tries the live scraper first and then falls back to `data/dynamax_attackers.csv` if the scraper returns zero rows:
+
+```bash
+python dynamax_update.py
+```
+
+The importer rejects obvious placeholder/example rows by default. Use `--allow-example-data` only for local formatting tests, never production bot data. Metadata key `dynamax_attackers` is marked fresh only when rows are actually imported/upserted.
 
 ## Egg pool cache auto-update behavior
 

@@ -20,6 +20,11 @@ from ai.egg_answerer import (
 from ai.openai_client import is_openai_enabled
 from ai.pokemon_answerer import answer_mixed_query_with_llm, answer_pokemon_query, answer_pokemon_query_with_llm
 from ai.query_answerer import answer_query, answer_query_with_llm
+from ai.dynamax_answerer import (
+    answer_dynamax_query_with_llm,
+    format_compact_dynamax_attacker_rows,
+    is_compact_dynamax_response,
+)
 from ai.raid_attacker_answerer import (
     _format_compact_raid_attacker_rows,
     _is_compact_raid_attacker_response,
@@ -42,6 +47,12 @@ from database.egg_pool_db import (
     search_egg_pools,
 )
 from database.cache_metadata import is_cache_stale
+from database.dynamax_attackers_db import (
+    count_dynamax_attackers,
+    get_best_dynamax_attackers_across_types,
+    get_top_dynamax_attackers_by_type,
+    search_dynamax_attackers,
+)
 from database.pokemon_db import find_pokemon_mentions, get_pokemon_meta_candidates, search_pokemon_knowledge
 from database.raid_attackers_db import (
     count_raid_attacker_rankings,
@@ -88,6 +99,10 @@ RANKING_LANGUAGE_PATTERN = re.compile(
 RAID_CONTEXT_PATTERN = re.compile(r"\b(?:raid|raids|raiding|pve)\b", re.IGNORECASE)
 CURRENT_RAID_EVENT_PATTERN = re.compile(
     r"\b(?:current|active|available|boss|bosses|schedule|5\s*-?\s*star|five\s*-?\s*star|mega\s+raid|right\s+now|rn|today|this\s+week)\b|in\s+raids\s+this\s+week",
+    re.IGNORECASE,
+)
+DYNAMAX_CONTEXT_PATTERN = re.compile(
+    r"\b(?:dynamax|gigantamax|dmax|gmax|max\s+battles?|max\s+attackers?)\b",
     re.IGNORECASE,
 )
 RAID_ATTACKER_PHRASE_PATTERN = re.compile(
@@ -139,6 +154,12 @@ EGG_INTENT_PATTERN = re.compile(
 def _raid_cache_notice(is_update_running: bool) -> str:
     if is_update_running and is_cache_stale(CACHE_NAME, RAID_ATTACKER_CACHE_MAX_AGE_DAYS):
         return "\n\n_Note: cached raid attacker data may be updating in the background._"
+    return ""
+
+
+def _dynamax_cache_notice(is_update_running: bool) -> str:
+    if is_update_running:
+        return "\n\n_Note: cached Dynamax attacker data may be updating in the background._"
     return ""
 
 
@@ -222,6 +243,8 @@ def _is_raid_attacker_query(query: str) -> bool:
     normalized = query.lower().strip()
     if not normalized:
         return True
+    if _is_dynamax_query(normalized):
+        return False
     if _is_current_raid_event_query(normalized):
         return False
 
@@ -240,6 +263,15 @@ def _is_raid_attacker_query(query: str) -> bool:
     if has_type and has_ranking_language:
         return True
     return False
+
+
+def _is_dynamax_query(query: str) -> bool:
+    """Return whether a query should use cached Dynamax/Gigantamax rankings."""
+
+    normalized = query.lower().strip()
+    if not normalized:
+        return False
+    return bool(DYNAMAX_CONTEXT_PATTERN.search(normalized))
 
 
 def _is_event_specific_query(query: str) -> bool:
@@ -357,6 +389,10 @@ def _detect_raid_attacker_type(query: str | None) -> str | None:
     return _detect_pokemon_type_from_query(query or "") or normalize_type_name(query or "")
 
 
+def _detect_dynamax_attacker_type(query: str | None) -> str | None:
+    return _detect_pokemon_type_from_query(query or "") or normalize_type_name(query or "")
+
+
 def infer_raid_attacker_route_from_bot_message(content: str) -> str | None:
     """Infer a raid attacker route from a previous compact bot answer."""
 
@@ -378,6 +414,24 @@ def infer_raid_attacker_route_from_bot_message(content: str) -> str | None:
     return None
 
 
+def infer_dynamax_route_from_bot_message(content: str) -> str | None:
+    """Infer a Dynamax attacker route from a previous compact bot answer."""
+
+    normalized = re.sub(r"\s+", " ", content or "").strip().lower()
+    if not normalized:
+        return None
+    for pokemon_type in POKEMON_TYPES:
+        if re.search(rf"\btop\s+(?:cached\s+)?{re.escape(pokemon_type)}\s*-\s*type\s+dynamax\s+attackers\b", normalized):
+            return f"type:{pokemon_type}"
+    if "top dynamax attackers, derived from cached per-type rankings" in normalized:
+        return "derived_overall"
+    if "source: cached pokémon go hub dynamax attacker tables." in normalized:
+        return "derived_overall"
+    if "source: cached pokemon go hub dynamax attacker tables." in normalized:
+        return "derived_overall"
+    return None
+
+
 def is_followup_count_request(query: str) -> bool:
     """Return whether a short reply is asking for more/top-N rows from context."""
 
@@ -389,6 +443,14 @@ def _get_raid_attacker_rows_for_route(route: str, limit: int) -> list[dict[str, 
         return get_best_raid_attackers_across_types(limit=limit)
     if route.startswith("type:"):
         return get_top_raid_attackers_by_type(route[5:], limit=limit)
+    return []
+
+
+def _get_dynamax_rows_for_route(route: str, limit: int) -> list[dict[str, Any]]:
+    if route == "derived_overall":
+        return get_best_dynamax_attackers_across_types(limit=limit)
+    if route.startswith("type:"):
+        return get_top_dynamax_attackers_by_type(route[5:], limit=limit)
     return []
 
 
@@ -404,6 +466,51 @@ def get_raid_attacker_rows_for_query(query: str | None, limit: int = 10) -> tupl
     if RANKING_LANGUAGE_PATTERN.search(normalized):
         return get_best_raid_attackers_across_types(limit=limit), "derived_overall"
     return search_raid_attackers(normalized, limit=limit), "search"
+
+
+def get_dynamax_attacker_rows_for_query(query: str | None, limit: int = 10) -> tuple[list[dict[str, Any]], str]:
+    """Return cached Dynamax/Gigantamax rows for a slash/mention query and route used."""
+
+    normalized = (query or "").strip().lower()
+    detected_type = _detect_dynamax_attacker_type(normalized)
+    if detected_type:
+        return get_top_dynamax_attackers_by_type(detected_type, limit=limit), f"type:{detected_type}"
+    if not normalized or _is_dynamax_query(normalized) or RANKING_LANGUAGE_PATTERN.search(normalized):
+        return get_best_dynamax_attackers_across_types(limit=limit), "derived_overall"
+    return search_dynamax_attackers(normalized, limit=limit), "search"
+
+
+def build_dynamax_attacker_response(
+    query: str | None,
+    rows: list[dict[str, Any]],
+    is_update_running: bool = False,
+    route: str = "search",
+) -> str:
+    """Return a user-facing response from cached Dynamax attacker data only."""
+
+    if not rows:
+        if count_dynamax_attackers() == 0:
+            return "The Dynamax attacker ranking cache is empty. Ask the bot owner to run `/updatedynamax`."
+        scope_text = f" for `{route}`" if route != "search" else ""
+        return f"No matching cached Dynamax attacker rankings were found{scope_text}." + _dynamax_cache_notice(is_update_running)
+
+    notice = _dynamax_cache_notice(is_update_running)
+    max_body_length = MAX_DISCORD_MESSAGE_LENGTH - len(notice)
+    compact_answer = format_compact_dynamax_attacker_rows(
+        rows,
+        route,
+        query,
+        max_rows=_requested_row_count(query),
+        max_chars=max_body_length,
+    )
+
+    if is_openai_enabled():
+        llm_answer = answer_dynamax_query_with_llm(query or "best dynamax attackers", rows, route)
+        if is_compact_dynamax_response(llm_answer, query, _requested_row_count(query), max_body_length):
+            return llm_answer + notice
+        logger.debug("Dynamax LLM response did not satisfy compact Discord format; using compact fallback formatter")
+
+    return compact_answer + notice
 
 
 def build_raid_attacker_response(
@@ -470,10 +577,18 @@ def route_mention_query(query: str) -> tuple[str, str, list[dict[str, Any]]]:
     return "search", "Local Pokémon GO Event Search Results", events
 
 
-def build_mention_response(query: str, is_raid_update_running: bool = False) -> tuple[str, str, int]:
+def build_mention_response(
+    query: str,
+    is_raid_update_running: bool = False,
+    is_dynamax_update_running: bool = False,
+) -> tuple[str, str, int]:
     """Return response text, route name, and result count for a mention query."""
 
     requested_count = _requested_row_count(query)
+    if _is_dynamax_query(query):
+        dynamax_rows, route = get_dynamax_attacker_rows_for_query(query, limit=requested_count)
+        return build_dynamax_attacker_response(query, dynamax_rows, is_dynamax_update_running, route), "dynamax_attackers", len(dynamax_rows)
+
     if _is_raid_attacker_query(query):
         raid_rows, route = get_raid_attacker_rows_for_query(query, limit=requested_count)
         return build_raid_attacker_response(query, raid_rows, is_raid_update_running, route), "raid_attackers", len(raid_rows)
@@ -525,15 +640,27 @@ def build_contextual_mention_response(
     query: str,
     previous_bot_message_content: str | None = None,
     is_raid_update_running: bool = False,
+    is_dynamax_update_running: bool = False,
 ) -> tuple[str, str, int]:
     """Return a mention/reply response while preserving previous bot answer context."""
 
     previous_route = infer_raid_attacker_route_from_bot_message(previous_bot_message_content or "")
+    previous_dynamax_route = infer_dynamax_route_from_bot_message(previous_bot_message_content or "")
     contextual_query = (
         f"Previous bot answer: {previous_bot_message_content}\nUser follow-up: {query}"
         if previous_bot_message_content
         else query
     )
+
+    if previous_dynamax_route and is_followup_count_request(query):
+        requested_count = _requested_row_count(query)
+        rows = _get_dynamax_rows_for_route(previous_dynamax_route, requested_count)
+        return build_dynamax_attacker_response(query, rows, is_dynamax_update_running, previous_dynamax_route), "dynamax_attackers", len(rows)
+
+    if previous_dynamax_route and _is_dynamax_query(contextual_query):
+        requested_count = _requested_row_count(query)
+        rows = _get_dynamax_rows_for_route(previous_dynamax_route, requested_count)
+        return build_dynamax_attacker_response(query, rows, is_dynamax_update_running, previous_dynamax_route), "dynamax_attackers", len(rows)
 
     if previous_route and is_followup_count_request(query):
         requested_count = _requested_row_count(query)
@@ -545,7 +672,7 @@ def build_contextual_mention_response(
         rows = _get_raid_attacker_rows_for_route(previous_route, requested_count)
         return build_raid_attacker_response(query, rows, is_raid_update_running, previous_route), "raid_attackers", len(rows)
 
-    response, route, count = build_mention_response(query, is_raid_update_running)
+    response, route, count = build_mention_response(query, is_raid_update_running, is_dynamax_update_running)
     if route == "raid_attackers" and previous_route:
         requested_count = _requested_row_count(query)
         rows = _get_raid_attacker_rows_for_route(previous_route, requested_count)
@@ -558,6 +685,7 @@ def register_commands(
     owner_id: int | None,
     raid_cache_manager: Any | None = None,
     egg_cache_manager: Any | None = None,
+    dynamax_cache_manager: Any | None = None,
 ) -> None:
     """Register all application commands on a command tree."""
 
@@ -605,6 +733,17 @@ def register_commands(
         answer = await asyncio.to_thread(build_raid_attacker_response, query, rows, is_running, route)
         await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
 
+    @tree.command(name="dynamax", description="Ask about cached Dynamax/Gigantamax attacker rankings.")
+    @app_commands.describe(query="Example: fire, best fighting gmax attackers, top 10 dmax pokemon")
+    async def dynamax_command(interaction: discord.Interaction, query: str = ""):
+        logger.info("Slash command invoked: /dynamax by user_id=%s", interaction.user.id)
+        await interaction.response.defer(ephemeral=False, thinking=True)
+        rows, route = get_dynamax_attacker_rows_for_query(query, limit=_requested_row_count(query))
+        logger.info("/dynamax returned %d row(s) for query=%r via route=%s", len(rows), query, route)
+        is_running = bool(dynamax_cache_manager and dynamax_cache_manager.is_update_running)
+        answer = await asyncio.to_thread(build_dynamax_attacker_response, query, rows, is_running, route)
+        await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
+
     @tree.command(name="eggs", description="Ask about cached current Pokémon GO egg pools.")
     @app_commands.describe(query="Example: 1km, 10km adventure sync, route gift, Larvesta")
     async def eggs_command(interaction: discord.Interaction, query: str = ""):
@@ -646,6 +785,14 @@ def register_commands(
     async def ask_command(interaction: discord.Interaction, query: str):
         logger.info("Slash command invoked: /ask by user_id=%s", interaction.user.id)
         await interaction.response.defer(ephemeral=False, thinking=True)
+        if _is_dynamax_query(query):
+            dynamax_rows, route = get_dynamax_attacker_rows_for_query(query, limit=_requested_row_count(query))
+            logger.info("/ask routed to Dynamax attacker rankings and returned %d row(s) for query=%r via route=%s", len(dynamax_rows), query, route)
+            is_running = bool(dynamax_cache_manager and dynamax_cache_manager.is_update_running)
+            answer = await asyncio.to_thread(build_dynamax_attacker_response, query, dynamax_rows, is_running, route)
+            await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
+            return
+
         if _is_raid_attacker_query(query):
             raid_rows, route = get_raid_attacker_rows_for_query(query, limit=_requested_row_count(query))
             logger.info("/ask routed to raid attacker rankings and returned %d row(s) for query=%r via route=%s", len(raid_rows), query, route)
@@ -704,6 +851,14 @@ def register_commands(
     async def pokemon_command(interaction: discord.Interaction, query: str):
         logger.info("Slash command invoked: /pokemon by user_id=%s", interaction.user.id)
         await interaction.response.defer(ephemeral=False, thinking=True)
+        if _is_dynamax_query(query):
+            dynamax_rows, route = get_dynamax_attacker_rows_for_query(query, limit=_requested_row_count(query))
+            logger.info("/pokemon routed to Dynamax attacker rankings and returned %d row(s) for query=%r via route=%s", len(dynamax_rows), query, route)
+            is_running = bool(dynamax_cache_manager and dynamax_cache_manager.is_update_running)
+            answer = await asyncio.to_thread(build_dynamax_attacker_response, query, dynamax_rows, is_running, route)
+            await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
+            return
+
         if _is_raid_attacker_query(query):
             raid_rows, route = get_raid_attacker_rows_for_query(query, limit=_requested_row_count(query))
             logger.info("/pokemon routed to raid attacker rankings and returned %d row(s) for query=%r via route=%s", len(raid_rows), query, route)
@@ -773,6 +928,43 @@ def register_commands(
             await interaction.followup.send("A raid attacker update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
         else:
             await interaction.followup.send("Raid attacker update failed. Existing cached data was kept.", ephemeral=True, suppress_embeds=True)
+
+    @tree.command(name="updatedynamax", description="Owner-only: force refresh cached Dynamax attacker data.")
+    async def update_dynamax_command(interaction: discord.Interaction):
+        logger.info("Slash command invoked: /updatedynamax by user_id=%s", interaction.user.id)
+        if owner_id is None or interaction.user.id != owner_id:
+            await interaction.response.send_message("This owner-only command can only be run by the configured bot owner.", ephemeral=True, suppress_embeds=True)
+            return
+        if dynamax_cache_manager is not None and dynamax_cache_manager.is_update_running:
+            await interaction.response.send_message("A Dynamax attacker update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
+            return
+        if dynamax_cache_manager is None:
+            await interaction.response.send_message("Dynamax cache manager is not available.", ephemeral=True, suppress_embeds=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await dynamax_cache_manager.force_refresh(reason="manual", wait_for_lock=False)
+        type_rows = result.stats.get("type_rows", {}) if result.stats else {}
+        metadata_updated = result.stats.get("metadata_updated", False) if result.stats else result.updated
+        error = result.stats.get("error") if result.stats else None
+        update_source = result.stats.get("update_source", "unknown") if result.stats else "unknown"
+        source_label = {"live_scraper": "live scraper", "manual_csv": "manual CSV fallback"}.get(update_source, update_source)
+        if result.updated:
+            await interaction.followup.send(
+                f"Dynamax update complete via {source_label}. Upserted {result.count} row(s). Type rows: {type_rows}. Metadata updated: {metadata_updated}.",
+                ephemeral=True,
+                suppress_embeds=True,
+            )
+        elif result.reason == "zero-rows":
+            await interaction.followup.send(
+                f"Dynamax update finished with no available rows from live scraper or manual CSV fallback. Existing cached data was kept and metadata was not marked fresh. Type rows: {type_rows}. Error: {error}.",
+                ephemeral=True,
+                suppress_embeds=True,
+            )
+        elif result.reason == "already-running":
+            await interaction.followup.send("A Dynamax attacker update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
+        else:
+            await interaction.followup.send("Dynamax attacker update failed. Existing cached data was kept.", ephemeral=True, suppress_embeds=True)
 
     @tree.command(name="updateeggs", description="Owner-only: force refresh cached egg pools.")
     async def update_eggs_command(interaction: discord.Interaction):

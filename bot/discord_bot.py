@@ -8,11 +8,20 @@ import logging
 import discord
 
 from bot.commands import build_contextual_mention_response, build_mention_response, register_commands
+from bot.dynamax_cache import dynamax_cache_manager
 from bot.egg_cache import egg_cache_manager
 from bot.raid_attacker_cache import raid_attacker_cache_manager
-from config import DISCORD_BOT_TOKEN, DISCORD_OWNER_ID, EGG_AUTO_UPDATE_CHECK_HOURS, RAID_ATTACKER_AUTO_UPDATE_CHECK_HOURS, configure_logging
+from config import (
+    DISCORD_BOT_TOKEN,
+    DISCORD_OWNER_ID,
+    DYNAMAX_AUTO_UPDATE_CHECK_HOURS,
+    EGG_AUTO_UPDATE_CHECK_HOURS,
+    RAID_ATTACKER_AUTO_UPDATE_CHECK_HOURS,
+    configure_logging,
+)
 from database.cache_metadata import init_cache_metadata_table
 from database.db import init_db
+from database.dynamax_attackers_db import init_dynamax_attacker_tables
 from database.egg_pool_db import init_egg_pool_tables
 from database.pokemon_db import init_pokemon_tables
 from database.raid_attackers_db import init_raid_attacker_tables
@@ -28,16 +37,20 @@ class PokemonGoBot(discord.Client):
         super().__init__(intents=intents)
         self.tree = discord.app_commands.CommandTree(self)
         self._raid_attacker_background_task: asyncio.Task[None] | None = None
+        self._dynamax_background_task: asyncio.Task[None] | None = None
         self._egg_background_task: asyncio.Task[None] | None = None
         self._startup_raid_cache_checked = False
+        self._startup_dynamax_cache_checked = False
         self._startup_egg_cache_checked = False
 
     async def setup_hook(self) -> None:
-        register_commands(self.tree, DISCORD_OWNER_ID, raid_attacker_cache_manager, egg_cache_manager)
+        register_commands(self.tree, DISCORD_OWNER_ID, raid_attacker_cache_manager, egg_cache_manager, dynamax_cache_manager)
         synced = await self.tree.sync()
         logger.info("Synced %d slash command(s).", len(synced))
         self._raid_attacker_background_task = asyncio.create_task(self._raid_attacker_background_loop())
         self._raid_attacker_background_task.add_done_callback(self._log_background_task_result)
+        self._dynamax_background_task = asyncio.create_task(self._dynamax_background_loop())
+        self._dynamax_background_task.add_done_callback(self._log_background_task_result)
         self._egg_background_task = asyncio.create_task(self._egg_background_loop())
         self._egg_background_task.add_done_callback(self._log_background_task_result)
 
@@ -60,6 +73,23 @@ class PokemonGoBot(discord.Client):
                     logger.info("Startup raid attacker cache status: fresh.")
 
         await self._check_startup_egg_cache()
+        await self._check_startup_dynamax_cache()
+
+    async def _check_startup_dynamax_cache(self) -> None:
+        if self._startup_dynamax_cache_checked:
+            logger.info("Startup Dynamax cache status already checked for this process; skipping duplicate startup check.")
+            return
+        self._startup_dynamax_cache_checked = True
+        try:
+            stale = dynamax_cache_manager.is_stale()
+        except Exception:
+            logger.exception("Failed to check Dynamax cache status on startup.")
+            return
+        if stale:
+            logger.info("Startup Dynamax cache status: stale.")
+            asyncio.create_task(dynamax_cache_manager.refresh_if_stale("startup"))
+        else:
+            logger.info("Startup Dynamax cache status: fresh.")
 
     async def _check_startup_egg_cache(self) -> None:
         if self._startup_egg_cache_checked:
@@ -85,6 +115,20 @@ class PokemonGoBot(discord.Client):
             result = await raid_attacker_cache_manager.refresh_if_stale("scheduled")
             logger.info(
                 "Scheduled raid attacker cache check finished: attempted=%s updated=%s count=%d reason=%s",
+                result.attempted,
+                result.updated,
+                result.count,
+                result.reason,
+            )
+
+    async def _dynamax_background_loop(self) -> None:
+        check_seconds = max(DYNAMAX_AUTO_UPDATE_CHECK_HOURS, 1) * 60 * 60
+        while not self.is_closed():
+            await asyncio.sleep(check_seconds)
+            logger.info("Running scheduled Dynamax cache freshness check.")
+            result = await dynamax_cache_manager.refresh_if_stale("scheduled")
+            logger.info(
+                "Scheduled Dynamax cache check finished: attempted=%s updated=%s count=%d reason=%s",
                 result.attempted,
                 result.updated,
                 result.count,
@@ -178,12 +222,14 @@ class PokemonGoBot(discord.Client):
                 query,
                 referenced_bot_message.content,
                 raid_attacker_cache_manager.is_update_running,
+                dynamax_cache_manager.is_update_running,
             )
         else:
             response, route, count = await asyncio.to_thread(
                 build_mention_response,
                 query,
                 raid_attacker_cache_manager.is_update_running,
+                dynamax_cache_manager.is_update_running,
             )
         logger.info("Mention route used: %s; returned %d event(s)", route, count)
         await message.reply(response, mention_author=False, suppress_embeds=True)
@@ -194,6 +240,7 @@ def main() -> None:
     init_db()
     init_cache_metadata_table()
     init_raid_attacker_tables()
+    init_dynamax_attacker_tables()
     init_egg_pool_tables()
     init_pokemon_tables()
     if not DISCORD_BOT_TOKEN:

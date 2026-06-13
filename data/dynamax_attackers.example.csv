@@ -1,0 +1,2 @@
+ranking_scope,pokemon_type,rank,pokemon_name,form,fast_move,charged_move,score,dps,tdo,summary,url
+type:fire,fire,1,Example Charizard,,Fire Spin,Max Flare,example,example,example,Example only - replace with real current Dynamax attacker data before importing.,https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire

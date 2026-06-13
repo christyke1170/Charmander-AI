@@ -18,17 +18,22 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config
 import database.db as db_module
+import dynamax_import
+import dynamax_update
 import raid_attacker_import
 import raid_attacker_update
 from ai.raid_attacker_answerer import _requested_row_count
 from bot.commands import (
     MAX_DISCORD_MESSAGE_LENGTH,
+    _is_dynamax_query,
     _is_egg_pool_query,
     _is_current_raid_event_query,
     _is_raid_attacker_query,
+    build_dynamax_attacker_response,
     build_egg_response,
     build_contextual_mention_response,
     build_raid_attacker_response,
+    get_dynamax_attacker_rows_for_query,
     get_raid_attacker_rows_for_query,
     infer_raid_attacker_route_from_bot_message,
     register_commands,
@@ -41,6 +46,13 @@ from database.egg_pool_db import (
     init_egg_pool_tables,
     search_egg_pools,
     upsert_egg_pool_rows,
+)
+from database.dynamax_attackers_db import (
+    count_dynamax_attackers,
+    get_best_dynamax_attackers_across_types,
+    get_top_dynamax_attackers_by_type,
+    init_dynamax_attacker_tables,
+    upsert_dynamax_attackers,
 )
 from database.raid_attackers_db import (
     get_best_raid_attackers_across_types,
@@ -59,6 +71,20 @@ from scraper.raid_attacker_scraper import (
     parse_best_per_type_table,
 )
 from scraper.egg_scraper import detect_egg_distance_km, detect_pool_type, parse_leekduck_egg_html
+from scraper.dynamax_attacker_scraper import (
+    DYNAMAX_ATTACKERS_URL,
+    _dynamax_profile_path,
+    _launch_context as launch_dynamax_context,
+    has_real_dynamax_content,
+    is_dynamax_blocked_content,
+    parse_dynamax_attackers_page,
+    parse_dynamax_attackers_text,
+    parse_rendered_dynamax_content,
+    scrape_dynamax_attackers_per_type,
+)
+
+
+DYNAMAX_CSV_HEADER = "ranking_scope,pokemon_type,rank,pokemon_name,form,fast_move,charged_move,score,dps,tdo,summary,url\n"
 
 
 class FakeCommandTree:
@@ -97,6 +123,7 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         init_cache_metadata_table()
         init_raid_attacker_tables()
+        init_dynamax_attacker_tables()
         init_egg_pool_tables()
 
     def _seed_rankings(self) -> None:
@@ -190,6 +217,79 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         )
+
+    def _seed_dynamax_rankings(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        upsert_dynamax_attackers(
+            [
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Charizard",
+                    "pokemon_type": "fire",
+                    "rank": 1,
+                    "fast_move": "Fire Spin",
+                    "charged_move": "Max Flare",
+                    "score": "28.04",
+                    "dps": "31.98",
+                    "tdo": "700",
+                    "url": "https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire",
+                    "scraped_at": scraped_at,
+                },
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fighting",
+                    "pokemon_name": "Machamp",
+                    "pokemon_type": "fighting",
+                    "rank": 1,
+                    "fast_move": "Counter",
+                    "charged_move": "Max Knuckle",
+                    "score": "29.00",
+                    "dps": "32.00",
+                    "tdo": "650",
+                    "url": "https://db.pokemongohub.net/best/dynamax-attackers-per-type#fighting",
+                    "scraped_at": scraped_at,
+                },
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Cinderace",
+                    "pokemon_type": "fire",
+                    "rank": 2,
+                    "fast_move": "Fire Fang",
+                    "charged_move": "Max Flare",
+                    "score": "26.00",
+                    "dps": "30.00",
+                    "tdo": "600",
+                    "url": "https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire",
+                    "scraped_at": scraped_at,
+                },
+            ]
+        )
+
+    def _sample_dynamax_rows(self, count: int = 12, url: str = "https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire") -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for index in range(1, count + 1):
+            rows.append(
+                {
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": f"Dynamax Fire Attacker {index}",
+                    "pokemon_type": "fire",
+                    "rank": index,
+                    "fast_move": "Fire Spin",
+                    "charged_move": "Max Flare",
+                    "score": f"{30 - (index / 10):.2f}",
+                    "dps": f"{35 - (index / 10):.2f}",
+                    "tdo": str(900 - index),
+                    "url": url,
+                }
+            )
+        return rows
+
+    def _write_dynamax_csv(self, body: str) -> Path:
+        path = self.data_dir / "dynamax_attackers.csv"
+        path.write_text(DYNAMAX_CSV_HEADER + body, encoding="utf-8")
+        return path
 
     def _sample_fire_rows(self, count: int = 12, url: str = "https://db.pokemongohub.net/pokemon-list/best-per-type/fire") -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
@@ -381,6 +481,20 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(query=query):
                 self.assertFalse(_is_raid_attacker_query(query))
 
+    def test_dynamax_intent_detection_routes_before_raid_attackers(self) -> None:
+        true_queries = [
+            "best fire dynamax attackers",
+            "top fighting gmax attackers",
+            "best dmax pokemon",
+        ]
+        for query in true_queries:
+            with self.subTest(query=query):
+                self.assertTrue(_is_dynamax_query(query))
+                self.assertFalse(_is_raid_attacker_query(query))
+
+        self.assertFalse(_is_dynamax_query("best fire raid attackers"))
+        self.assertTrue(_is_raid_attacker_query("best fire raid attackers"))
+
     def test_current_raid_event_queries_still_route_to_events(self) -> None:
         true_queries = [
             "what raids are active rn",
@@ -446,6 +560,100 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([row["pokemon_name"] for row in rows], ["Steel One", "Dragon Tie Low DPS", "Water One", "Fire One"])
         self.assertEqual([row["ranking_scope"] for row in rows], ["type:steel", "type:dragon", "type:water", "type:fire"])
+
+    def test_dynamax_table_upsert_query_by_type_and_derived_sort(self) -> None:
+        self._seed_dynamax_rankings()
+
+        self.assertEqual(count_dynamax_attackers(), 3)
+        fire_rows = get_top_dynamax_attackers_by_type("fire", limit=5)
+        self.assertEqual([row["pokemon_name"] for row in fire_rows], ["Charizard", "Cinderace"])
+        derived = get_best_dynamax_attackers_across_types(limit=2)
+        self.assertEqual([row["pokemon_name"] for row in derived], ["Machamp", "Charizard"])
+
+    def test_dynamax_query_routing_uses_type_or_derived_overall(self) -> None:
+        self._seed_dynamax_rankings()
+
+        fire_rows, fire_route = get_dynamax_attacker_rows_for_query("best fire dynamax attackers", limit=5)
+        overall_rows, overall_route = get_dynamax_attacker_rows_for_query("best dmax pokemon", limit=5)
+
+        self.assertEqual(fire_route, "type:fire")
+        self.assertEqual(fire_rows[0]["pokemon_name"], "Charizard")
+        self.assertEqual(overall_route, "derived_overall")
+        self.assertEqual(overall_rows[0]["pokemon_name"], "Machamp")
+
+    def test_dynamax_csv_importer_imports_valid_rows_and_updates_metadata(self) -> None:
+        csv_path = self._write_dynamax_csv(
+            "type:fire,fire,1,Charizard,,Fire Spin,Max Flare,28.04,31.98,700,Manual row,https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire\n"
+        )
+
+        result = dynamax_import.import_dynamax_csv(path=csv_path)
+
+        self.assertEqual(result["rows_read"], 1)
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertTrue(result["metadata_updated"])
+        self.assertEqual(get_cache_metadata("dynamax_attackers")["source"], "manual_dynamax_csv")
+        rows = get_top_dynamax_attackers_by_type("fire", limit=5)
+        self.assertEqual(rows[0]["pokemon_name"], "Charizard")
+
+    def test_dynamax_csv_importer_rejects_placeholder_rows_by_default(self) -> None:
+        csv_path = self._write_dynamax_csv(
+            "type:fire,fire,1,Example Charizard,,Fire Spin,Max Flare,example,example,example,Example only - replace with real data,https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire\n"
+        )
+
+        result = dynamax_import.import_dynamax_csv(path=csv_path)
+
+        self.assertEqual(result["rows_read"], 1)
+        self.assertEqual(result["imported"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertTrue(result["example_data_rejected"])
+        self.assertFalse(result["metadata_updated"])
+        self.assertIsNone(get_cache_metadata("dynamax_attackers"))
+
+    def test_dynamax_csv_importer_does_not_update_metadata_when_zero_imported(self) -> None:
+        csv_path = self._write_dynamax_csv(
+            "type:fire,notatype,1,Charizard,,Fire Spin,Max Flare,28.04,31.98,700,Manual row,https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire\n"
+        )
+
+        result = dynamax_import.import_dynamax_csv(path=csv_path)
+
+        self.assertEqual(result["imported"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertFalse(result["metadata_updated"])
+        self.assertTrue(result["validation_errors"])
+        self.assertIsNone(get_cache_metadata("dynamax_attackers"))
+
+    def test_dynamax_update_falls_back_to_csv_when_scraper_returns_zero_rows(self) -> None:
+        csv_path = self._write_dynamax_csv(
+            "type:fighting,fighting,1,Machamp,,Counter,Max Knuckle,29.00,32.00,650,Manual row,https://db.pokemongohub.net/best/dynamax-attackers-per-type#fighting\n"
+        )
+
+        with mock.patch("dynamax_update.scrape_dynamax_attackers_per_type", return_value=([], {"rows_parsed": 0, "scraper_stage": "requests"})), mock.patch.object(
+            dynamax_import, "CSV_PATH", csv_path
+        ):
+            count, stats = dynamax_update.run_dynamax_update(force=True)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(stats.get("update_source"), "manual_csv")
+        self.assertEqual(stats.get("csv_imported"), 1)
+        self.assertTrue(stats.get("metadata_updated"))
+        self.assertEqual(get_top_dynamax_attackers_by_type("fighting", limit=5)[0]["pokemon_name"], "Machamp")
+        self.assertEqual(get_cache_metadata("dynamax_attackers")["source"], "manual_dynamax_csv")
+
+    def test_dynamax_fire_response_returns_rows_after_csv_import(self) -> None:
+        csv_path = self._write_dynamax_csv(
+            "type:fire,fire,1,Charizard,,Fire Spin,Max Flare,28.04,31.98,700,Manual row,https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire\n"
+        )
+        dynamax_import.import_dynamax_csv(path=csv_path)
+
+        rows, route = get_dynamax_attacker_rows_for_query("fire", limit=5)
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response = build_dynamax_attacker_response("/dynamax fire", rows, route=route)
+
+        self.assertEqual(route, "type:fire")
+        self.assertIn("Top cached Fire-type Dynamax attackers:", response)
+        self.assertIn("Charizard", response)
+        self.assertEqual(response.count("Source:"), 1)
 
     def test_default_raid_attacker_response_is_compact_top_5_without_tdo(self) -> None:
         rows = self._sample_fire_rows(count=12)
@@ -515,6 +723,60 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.count(source_url), 1)
         self.assertIn(f"Source: {source_url}", response)
+
+    def test_dynamax_formatting_is_compact_single_source_and_capped(self) -> None:
+        rows = self._sample_dynamax_rows(count=25)
+
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response = build_dynamax_attacker_response("top 25 fire gmax attackers", rows, route="type:fire")
+
+        numbered_rows = self._compact_numbered_rows(response)
+        self.assertIn("Top cached Fire-type Dynamax attackers:", response)
+        self.assertGreater(len(numbered_rows), 0)
+        self.assertLessEqual(len(numbered_rows), 20)
+        self.assertIn("Max Move Damage", response)
+        self.assertEqual(response.count("Source:"), 1)
+        self.assertEqual(response.count("https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire"), 1)
+        self.assertLessEqual(len(response), MAX_DISCORD_MESSAGE_LENGTH)
+
+    def test_dynamax_formatting_uses_max_move_damage_and_omits_fake_missing_metrics(self) -> None:
+        rows = [
+            {
+                "ranking_scope": "type:fire",
+                "pokemon_name": "Gigantamax Cinderace",
+                "pokemon_type": "fire",
+                "rank": 1,
+                "fast_move": "Tackle",
+                "charged_move": "G-Max Fireball",
+                "score": "350.12",
+                "dps": "should-not-render",
+                "tdo": "should-not-render",
+                "url": "https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire",
+            },
+            {
+                "ranking_scope": "type:fire",
+                "pokemon_name": "Dynamax Charizard",
+                "pokemon_type": "fire",
+                "rank": 2,
+                "fast_move": "Fire Spin",
+                "charged_move": "Max Flare",
+                "score": None,
+                "dps": None,
+                "tdo": None,
+                "url": "https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire",
+            },
+        ]
+
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response = build_dynamax_attacker_response("top fire dynamax attackers with tdo", rows, route="type:fire")
+
+        numbered_rows = self._compact_numbered_rows(response)
+        self.assertEqual(numbered_rows[0], "1. Gigantamax Cinderace — Tackle / G-Max Fireball — Max Move Damage 350.12")
+        self.assertEqual(numbered_rows[1], "2. Dynamax Charizard — Fire Spin / Max Flare")
+        self.assertNotIn("Score", response)
+        self.assertNotIn("DPS", response)
+        self.assertNotIn("TDO", response)
+        self.assertNotIn("unknown", response.lower())
 
     def test_derived_overall_uses_single_cached_source_line(self) -> None:
         rows = self._sample_fire_rows(count=3)
@@ -611,6 +873,14 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("raidattackers", tree.commands)
         self.assertIn("updateraidattackers", tree.commands)
+
+    def test_dynamax_commands_are_registered(self) -> None:
+        tree = FakeCommandTree()
+
+        register_commands(tree, owner_id=123, raid_cache_manager=None, egg_cache_manager=None, dynamax_cache_manager=None)
+
+        self.assertIn("dynamax", tree.commands)
+        self.assertIn("updatedynamax", tree.commands)
 
     def test_egg_table_upsert_search_by_distance_and_pokemon(self) -> None:
         scraped_at = datetime.now(timezone.utc).isoformat()
@@ -801,6 +1071,238 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["ranking_scope"], "type:fire")
         self.assertEqual(rows[0]["pokemon_name"], "Mega Blaziken")
 
+    def test_dynamax_parser_maps_type_anchor_sections(self) -> None:
+        html = """
+        <html><body>
+          <h2 id="fire">Fire</h2>
+          <table>
+            <tr><th>#</th><th>Name</th><th>Fast Move</th><th>Max Move</th><th>DPS</th><th>TDO</th><th>Score</th></tr>
+            <tr><td>1</td><td>Charizard</td><td>Fire Spin</td><td>Max Flare</td><td>31.98</td><td>700</td><td>28.04</td></tr>
+          </table>
+          <h2 id="fighting">Fighting</h2>
+          <table>
+            <tr><th>#</th><th>Name</th><th>Fast Attack</th><th>Charged Attack</th><th>DPS</th><th>TDO</th><th>Score</th></tr>
+            <tr><td>1</td><td>Machamp</td><td>Counter</td><td>Max Knuckle</td><td>32.00</td><td>650</td><td>29.00</td></tr>
+          </table>
+        </body></html>
+        """
+
+        rows, type_rows = parse_dynamax_attackers_page(html, scraped_at="2026-06-12T00:00:00+00:00")
+
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertEqual(type_rows["fire"], 1)
+        self.assertEqual(type_rows["fighting"], 1)
+        self.assertEqual(rows[0]["source"], "pokemongohub_dynamax_attackers_per_type")
+        self.assertEqual(rows[0]["ranking_scope"], "type:fire")
+        self.assertEqual(rows[0]["pokemon_name"], "Charizard")
+        self.assertEqual(rows[0]["charged_move"], "Max Flare")
+        self.assertEqual(rows[0]["url"], "https://db.pokemongohub.net/best/dynamax-attackers-per-type#fire")
+
+    def test_dynamax_single_page_parser_assigns_multiple_sections_and_limits_rows(self) -> None:
+        fire_rows = "".join(
+            f"<tr><td>{index}</td><td>Fire Mon {index}</td><td>Fire Spin</td><td>Max Flare</td><td>{30-index}</td><td>{700-index}</td><td>{28-index}</td></tr>"
+            for index in range(1, 12)
+        )
+        html = f"""
+        <html><body>
+          <section id="fire">
+            <h2>Fire</h2>
+            <table>
+              <tr><th>#</th><th>Name</th><th>Fast Move</th><th>Max Move</th><th>DPS</th><th>TDO</th><th>Score</th></tr>
+              {fire_rows}
+            </table>
+          </section>
+          <a id="water"></a>
+          <h2>Water Type Dynamax Attackers</h2>
+          <table>
+            <tr><th>#</th><th>Name</th><th>Fast Attack</th><th>Charged Attack</th><th>DPS</th><th>TDO</th><th>Score</th></tr>
+            <tr><td>1</td><td>Blastoise</td><td>Water Gun</td><td>Max Geyser</td><td>29.1</td><td>680</td><td>27.0</td></tr>
+          </table>
+        </body></html>
+        """
+
+        rows, type_rows = parse_dynamax_attackers_page(html, limit_per_type=10, scraped_at="2026-06-12T00:00:00+00:00")
+
+        self.assertEqual(type_rows["fire"], 10)
+        self.assertEqual(type_rows["water"], 1)
+        self.assertEqual([row["pokemon_type"] for row in rows if row["pokemon_type"] == "fire"], ["fire"] * 10)
+        self.assertEqual([row["ranking_scope"] for row in rows if row["pokemon_type"] == "fire"], ["type:fire"] * 10)
+        water_row = next(row for row in rows if row["pokemon_type"] == "water")
+        self.assertEqual(water_row["pokemon_name"], "Blastoise")
+        self.assertEqual(water_row["ranking_scope"], "type:water")
+        self.assertEqual(water_row["url"], f"{DYNAMAX_ATTACKERS_URL}#water")
+
+    def test_dynamax_scraper_fetches_base_page_once_not_hash_urls(self) -> None:
+        html = """
+        <html><body>
+          <h2 id="fire">Fire</h2>
+          <table><tr><th>#</th><th>Name</th><th>Fast Move</th><th>Max Move</th><th>DPS</th><th>TDO</th><th>Score</th></tr>
+          <tr><td>1</td><td>Charizard</td><td>Fire Spin</td><td>Max Flare</td><td>31.98</td><td>700</td><td>28.04</td></tr></table>
+        </body></html>
+        """
+
+        with mock.patch("scraper.dynamax_attacker_scraper.fetch_dynamax_attackers_page", return_value=(DYNAMAX_ATTACKERS_URL, 200, html)) as fetcher, mock.patch(
+            "scraper.dynamax_attacker_scraper._scrape_with_browser"
+        ) as browser_scraper:
+            rows, stats = scrape_dynamax_attackers_per_type(limit_per_type=10)
+
+        fetcher.assert_called_once_with()
+        browser_scraper.assert_not_called()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(stats.get("pages_checked"), 1)
+        self.assertEqual(rows[0]["url"], f"{DYNAMAX_ATTACKERS_URL}#fire")
+
+    def test_dynamax_block_detection_prefers_real_content_markers(self) -> None:
+        text = """
+        db.pokemongohub.net Performing security verification Cloudflare
+        Best Dynamax Attackers Per Type
+        Top 10 Normal-type Dynamax Attackers
+        Max Move Damage
+        Max Phases
+        """
+
+        self.assertTrue(has_real_dynamax_content(text))
+        self.assertFalse(is_dynamax_blocked_content(text, title="Best Dynamax Attackers Per Type (Pokémon GO)"))
+        self.assertTrue(is_dynamax_blocked_content("Performing security verification by Cloudflare", title="Just a moment..."))
+
+    def test_dynamax_text_parser_parses_debug_style_sections(self) -> None:
+        text = """
+        Best Dynamax Attackers Per Type (Pokémon GO)
+        Top 10 Normal-type Dynamax Attackers
+
+        Here are the top 10 Normal-type Max Battle attackers, ranked by Max Move damage:
+
+        #
+        Name
+        Fast Attack
+        Charged Attack
+        Max Move Damage
+        Max Phases
+        1.
+        Gigantamax Snorlax
+
+        Zen Headbutt
+
+        G-Max Replenish
+                284.85  18
+        2.
+        Dynamax Darmanitan
+
+        Tackle
+
+        Max Strike
+                250.49  20
+
+        Top 10 Fighting-type Dynamax Attackers
+        #
+        Name
+        Fast Attack
+        Charged Attack
+        Max Move Damage
+        Max Phases
+        1.
+        Gigantamax Machamp
+
+        Counter
+
+        G-Max Chi Strike
+                342.55  17
+        """
+
+        rows, type_rows = parse_dynamax_attackers_text(text, timestamp="2026-06-12T00:00:00+00:00")
+
+        self.assertEqual(type_rows["normal"], 2)
+        self.assertEqual(type_rows["fighting"], 1)
+        first = rows[0]
+        self.assertEqual(first["pokemon_type"], "normal")
+        self.assertEqual(first["ranking_scope"], "type:normal")
+        self.assertEqual(first["rank"], 1)
+        self.assertEqual(first["pokemon_name"], "Gigantamax Snorlax")
+        self.assertEqual(first["fast_move"], "Zen Headbutt")
+        self.assertEqual(first["charged_move"], "G-Max Replenish")
+        self.assertEqual(first["score"], "284.85")
+        self.assertIsNone(first["dps"])
+        self.assertIsNone(first["tdo"])
+        self.assertEqual(first["summary"], "Max Move Damage: 284.85; Max Phases: 18")
+        self.assertEqual(first["url"], f"{DYNAMAX_ATTACKERS_URL}#normal")
+
+    def test_dynamax_rendered_parser_prefers_text_when_dom_score_coverage_is_poor(self) -> None:
+        html = """
+        <html><body>
+          <h1>Best Dynamax Attackers Per Type</h1>
+          <h2 id="fire">Fire</h2>
+          <table>
+            <tr><th>#</th><th>Name</th><th>Fast Move</th><th>Max Move</th><th>Max Phases</th></tr>
+            <tr><td>1</td><td>DOM Cinderace</td><td>Tackle</td><td>G-Max Fireball</td><td>18</td></tr>
+          </table>
+        </body></html>
+        """
+        visible_text = """
+        Best Dynamax Attackers Per Type
+        Top 10 Fire-type Dynamax Attackers
+        #
+        Name
+        Fast Attack
+        Charged Attack
+        Max Move Damage
+        Max Phases
+        1.
+        Gigantamax Cinderace
+        Tackle
+        G-Max Fireball
+        350.12 18
+        """
+
+        rows, type_rows, metadata, blocked = parse_rendered_dynamax_content(
+            html=html,
+            visible_text=visible_text,
+            title="Best Dynamax Attackers Per Type (Pokémon GO)",
+            scraped_at="2026-06-12T00:00:00+00:00",
+            return_metadata=True,
+        )
+
+        self.assertFalse(blocked)
+        self.assertEqual(metadata["parser_used"], "text_preferred_score_coverage")
+        self.assertEqual(metadata["dom_rows"], 1)
+        self.assertEqual(metadata["text_rows"], 1)
+        self.assertEqual(metadata["dom_score_rows"], 0)
+        self.assertEqual(metadata["text_score_rows"], 1)
+        self.assertEqual(type_rows["fire"], 1)
+        self.assertEqual(rows[0]["pokemon_name"], "Gigantamax Cinderace")
+        self.assertEqual(rows[0]["score"], "350.12")
+        self.assertEqual(rows[0]["summary"], "Max Move Damage: 350.12; Max Phases: 18")
+
+    def test_dynamax_rendered_parser_uses_text_fallback_when_dom_has_no_rows(self) -> None:
+        visible_text = """
+        Best Dynamax Attackers Per Type
+        Top 10 Normal-type Dynamax Attackers
+        #
+        Name
+        Fast Attack
+        Charged Attack
+        Max Move Damage
+        Max Phases
+        1.
+        Gigantamax Snorlax
+        Zen Headbutt
+        G-Max Replenish
+        284.85 18
+        """
+
+        rows, type_rows, parser_used, blocked = parse_rendered_dynamax_content(
+            html="<html><body><h1>Best Dynamax Attackers Per Type</h1></body></html>",
+            visible_text=visible_text,
+            title="Best Dynamax Attackers Per Type (Pokémon GO)",
+            scraped_at="2026-06-12T00:00:00+00:00",
+        )
+
+        self.assertFalse(blocked)
+        self.assertEqual(parser_used, "text")
+        self.assertEqual(type_rows["normal"], 1)
+        self.assertEqual(rows[0]["pokemon_name"], "Gigantamax Snorlax")
+        self.assertEqual(rows[0]["score"], "284.85")
+        self.assertIn("Max Phases: 18", rows[0]["summary"])
+
     def test_browser_scraper_module_imports_without_running_browser(self) -> None:
         import scraper.raid_attacker_browser_scraper as browser_scraper
 
@@ -813,6 +1315,56 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(config.RAID_ATTACKER_BROWSER_TIMEOUT_SECONDS, int)
         self.assertIsInstance(config.RAID_ATTACKER_BROWSER_SLOW_MO_MS, int)
         self.assertIsInstance(config.RAID_ATTACKER_BROWSER_PROFILE_DIR, str)
+        self.assertIsInstance(config.DYNAMAX_USE_BROWSER_SCRAPER, bool)
+        self.assertIsInstance(config.DYNAMAX_BROWSER_HEADLESS, bool)
+        self.assertIsInstance(config.DYNAMAX_BROWSER_TIMEOUT_SECONDS, int)
+        self.assertIsInstance(config.DYNAMAX_BROWSER_SLOW_MO_MS, int)
+        self.assertIsInstance(config.DYNAMAX_BROWSER_PROFILE_DIR, str)
+
+    def test_dynamax_persistent_profile_path_resolves_relative_to_project(self) -> None:
+        with mock.patch.object(config, "DYNAMAX_BROWSER_PROFILE_DIR", "data/playwright-dynamax-profile"):
+            self.assertEqual(_dynamax_profile_path(), config.BASE_DIR / "data" / "playwright-dynamax-profile")
+        with mock.patch.object(config, "DYNAMAX_BROWSER_PROFILE_DIR", ""):
+            self.assertIsNone(_dynamax_profile_path())
+
+    def test_dynamax_launch_context_uses_persistent_profile_and_force_headed(self) -> None:
+        class FakeChromium:
+            def __init__(self) -> None:
+                self.launch_persistent_context_calls: list[tuple[str, dict[str, object]]] = []
+                self.launch_calls: list[dict[str, object]] = []
+
+            def launch_persistent_context(self, user_data_dir: str, **launch_options):
+                self.launch_persistent_context_calls.append((user_data_dir, launch_options))
+                return "context"
+
+            def launch(self, **launch_options):
+                self.launch_calls.append(launch_options)
+                return mock.Mock(new_context=mock.Mock(return_value="context"))
+
+        fake_playwright = mock.Mock(chromium=FakeChromium())
+        profile_dir = self.temp_path / "dynamax-profile"
+
+        with mock.patch.object(config, "DYNAMAX_BROWSER_PROFILE_DIR", str(profile_dir)), mock.patch.object(
+            config, "DYNAMAX_BROWSER_HEADLESS", True
+        ), mock.patch.object(config, "DYNAMAX_BROWSER_SLOW_MO_MS", 50):
+            context, browser, profile_path = launch_dynamax_context(fake_playwright, force_headed=True)
+
+        self.assertEqual(context, "context")
+        self.assertIsNone(browser)
+        self.assertEqual(profile_path, profile_dir)
+        self.assertTrue(profile_dir.exists())
+        self.assertEqual(fake_playwright.chromium.launch_persistent_context_calls[0][1]["headless"], False)
+        self.assertEqual(fake_playwright.chromium.launch_persistent_context_calls[0][1]["slow_mo"], 50)
+
+    def test_dynamax_update_passes_pause_browser_to_scraper(self) -> None:
+        with mock.patch("dynamax_update.scrape_dynamax_attackers_per_type", return_value=([], {"rows_parsed": 0, "scraper_stage": "browser"})) as scraper, mock.patch.object(
+            dynamax_import, "CSV_PATH", self.temp_path / "missing_dynamax.csv"
+        ):
+            count, stats = dynamax_update.run_dynamax_update(force=True, pause_browser=True)
+
+        self.assertEqual(count, 0)
+        scraper.assert_called_once_with(limit_per_type=10, pause_browser=True)
+        self.assertFalse(stats.get("metadata_updated"))
 
     def test_update_flow_tries_browser_after_zero_request_rows_when_enabled(self) -> None:
         browser_row = {

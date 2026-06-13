@@ -10,4 +10,6 @@ database/*.sqlite
 database/*.db
 
 data/raid_attackers_seed.csv
+data/dynamax_attackers.csv
 data/playwright-profile/
+data/playwright-dynamax-profile/
