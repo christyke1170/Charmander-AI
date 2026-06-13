@@ -541,13 +541,19 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_raid_attacker_intent_detection_handles_natural_language_and_typos(self) -> None:
         true_queries = [
             "what are the best pokemon to use in raids",
-            "what are the best water pokemon",
+            "best fire raid attackers",
+            "best fire attackers",
+            "top 10 fire raid attackers",
             "top Steel type tchackers",
             "best steel types, top 10",
         ]
         false_queries = [
             "what raids are active rn",
             "what 5-star raids are active",
+            "what if I dont like fire types",
+            "do you like fire types",
+            "i dont like fire pokemon",
+            "fire types are cool",
         ]
 
         for query in true_queries:
@@ -592,6 +598,7 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
         queries = [
             "tell me a joke",
             "what is your favorite pokemon",
+            "what if I dont like fire types",
             "do you like rain",
             "what is hotpot",
         ]

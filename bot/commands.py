@@ -111,6 +111,10 @@ RANKING_LANGUAGE_PATTERN = re.compile(
     r"\b(?:best|top|strongest|meta|ranking|rankings|ranked|good|use|using|power\s+up|invest\s+in|types?|mons?|pokemon|pokémon)\b",
     re.IGNORECASE,
 )
+RAID_ATTACKER_INTENT_PATTERN = re.compile(
+    r"\b(?:raid|raids|raiding|pve|attackers?|atackers?|attakers?|tchackers?|attack|counter|counters|best|top|rank|ranking|strongest|dps|tdo)\b",
+    re.IGNORECASE,
+)
 RAID_CONTEXT_PATTERN = re.compile(r"\b(?:raid|raids|raiding|pve)\b", re.IGNORECASE)
 CURRENT_RAID_EVENT_PATTERN = re.compile(
     r"\b(?:current|active|available|boss|bosses|schedule|5\s*-?\s*star|five\s*-?\s*star|mega\s+raid|right\s+now|rn|today|this\s+week)\b|in\s+raids\s+this\s+week",
@@ -318,6 +322,36 @@ def _is_current_raid_event_query(query: str) -> bool:
     return True
 
 
+def _is_casual_type_chat(query: str) -> bool:
+    """Return whether a query is casual preference/opinion chat about types or Pokémon."""
+
+    normalized = query.lower().strip().replace("’", "'")
+    if not normalized:
+        return False
+
+    has_type = _detect_pokemon_type_from_query(normalized) is not None
+    has_type_or_pokemon = has_type or bool(re.search(r"\b(?:pokemon|pokémon|types?)\b", normalized))
+    if not has_type_or_pokemon:
+        return False
+
+    casual_patterns = (
+        r"\bwhat\s+if\s+i\s+do\s*not\s+like\b",
+        r"\bwhat\s+if\s+i\s+don't\s+like\b",
+        r"\bwhat\s+if\s+i\s+dont\s+like\b",
+        r"\bi\s+do\s*not\s+like\b",
+        r"\bi\s+don't\s+like\b",
+        r"\bi\s+dont\s+like\b",
+        r"\bdo\s+you\s+like\b",
+        r"\bwhat\s+is\s+your\s+favorite\b",
+        r"\bmy\s+favorite\b",
+        r"\bi\s+like\b",
+        r"\bi\s+hate\b",
+        r"\bare\s+.+\s+cool\b",
+        r"\b.+\s+are\s+cool\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in casual_patterns)
+
+
 def _is_raid_attacker_query(query: str) -> bool:
     """Return whether a natural-language query should use raid attacker rankings."""
 
@@ -325,6 +359,8 @@ def _is_raid_attacker_query(query: str) -> bool:
     if not normalized:
         return True
     if _is_dynamax_query(normalized):
+        return False
+    if _is_casual_type_chat(normalized):
         return False
     if _is_current_raid_event_query(normalized):
         return False
@@ -334,6 +370,8 @@ def _is_raid_attacker_query(query: str) -> bool:
     has_attacker_word = bool(ATTACKER_WORD_PATTERN.search(normalized))
     has_ranking_language = bool(RANKING_LANGUAGE_PATTERN.search(normalized))
     has_raid_context = bool(RAID_CONTEXT_PATTERN.search(normalized))
+    has_explicit_raid_attacker_intent = bool(RAID_ATTACKER_INTENT_PATTERN.search(normalized) or "use in raids" in normalized)
+    has_explicit_type_ranking_request = bool(re.search(r"\b(?:top\s+\d{1,3}|best\s+\w+\s+types?|top\s+\w+\s+types?)\b", normalized))
 
     if RAID_ATTACKER_PHRASE_PATTERN.search(normalized):
         return True
@@ -341,7 +379,9 @@ def _is_raid_attacker_query(query: str) -> bool:
         return True
     if has_raid_context and has_ranking_language:
         return True
-    if has_type and has_ranking_language:
+    if has_type and has_explicit_type_ranking_request:
+        return True
+    if has_type and has_explicit_raid_attacker_intent and (has_attacker_word or has_raid_context or "counter" in normalized or "use in raids" in normalized):
         return True
     return False
 
