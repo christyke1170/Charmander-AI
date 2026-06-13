@@ -2,7 +2,7 @@
 
 A local-first Pokémon GO Discord bot that gathers event/news information from public sources, stores it in SQLite, and lets Discord users query the local database with slash commands.
 
-The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gigantamax attacker rankings, and LeekDuck egg pools in SQLite. Owner commands and background refresh jobs update those caches, while user-facing commands answer quickly from local data.
+The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gigantamax attacker rankings, LeekDuck egg pools, and PvPoke Great/Ultra/Master League rankings in SQLite. Owner commands and background refresh jobs update those caches, while user-facing commands answer quickly from local data.
 
 ## Features
 
@@ -14,6 +14,7 @@ The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gi
 - Stores raid attacker ranking rows in a separate `raid_attacker_rankings` SQLite table, with freshness timestamps in `cache_metadata`
 - Stores Dynamax/Gigantamax attacker ranking rows in a separate `dynamax_attackers` SQLite table, with freshness timestamps in `cache_metadata`
 - Stores LeekDuck egg pool rows in a separate `egg_pools` SQLite table, with freshness timestamps in `cache_metadata`
+- Stores PvPoke Great, Ultra, and Master League ranking rows in a separate `pvp_rankings` SQLite table, with freshness timestamps in `cache_metadata`
 - Deduplicates events with `UNIQUE(source, title, start_time)`
 - Discord slash commands:
   - `/events` — upcoming events
@@ -24,12 +25,14 @@ The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gi
   - `/raidattackers query:` — ask about cached monthly raid attacker rankings/data
   - `/dynamax query:` — ask about cached monthly Dynamax/Gigantamax attacker rankings/data
   - `/eggs query:` — ask about cached current egg pools, distances, Adventure Sync/Route Gift pools, or Pokémon hatch availability
+  - `/pvp query:` — ask about cached PvPoke Great/Ultra/Master League rankings
   - `/pokemon query:` — ask about cached Pokémon GO Hub Pokémon knowledge
   - `/update` — owner-only manual update
   - `/updatepokemon` — owner-only manual Pokémon GO Hub DB cache update
   - `/updateraidattackers` — owner-only manual raid attacker cache refresh
   - `/updatedynamax` — owner-only manual Dynamax/Gigantamax attacker cache refresh
   - `/updateeggs` — owner-only manual LeekDuck egg pool cache refresh
+  - `/updatepvp` — owner-only manual PvPoke ranking cache refresh
   - `/importpokemon` — owner-only local CSV/JSON Pokémon knowledge import fallback
 - Mention-based local Q&A, such as `@Pokemon GO AI Bot what raids are active?`
 - Optional OpenAI-powered RAG answers for `/ask`, `/pokemon`, and @mention conversations after local rows are retrieved
@@ -103,6 +106,9 @@ DYNAMAX_AUTO_UPDATE_CHECK_HOURS=24
 EGG_CACHE_MAX_AGE_DAYS=30
 EGG_AUTO_UPDATE=true
 EGG_AUTO_UPDATE_CHECK_HOURS=24
+PVP_CACHE_MAX_AGE_DAYS=30
+PVP_AUTO_UPDATE=true
+PVP_AUTO_UPDATE_CHECK_HOURS=24
 RAID_ATTACKER_USE_BROWSER_SCRAPER=true
 RAID_ATTACKER_BROWSER_HEADLESS=true
 RAID_ATTACKER_BROWSER_TIMEOUT_SECONDS=45
@@ -117,7 +123,7 @@ DYNAMAX_BROWSER_PROFILE_DIR=data/playwright-dynamax-profile
 
 To get your Discord user ID, enable Developer Mode in Discord, right-click your user, and choose **Copy User ID**.
 
-Raid attacker, Dynamax attacker, and egg auto-refresh settings control cache age and check frequency. SQLite `cache_metadata.last_updated` stores the actual successful update timestamps.
+Raid attacker, Dynamax attacker, egg, and PvP auto-refresh settings control cache age and check frequency. SQLite `cache_metadata.last_updated` stores the actual successful update timestamps.
 
 ## Run the manual weekly update
 
@@ -303,6 +309,43 @@ Run the egg updater manually with:
 python egg_update.py --force
 ```
 
+## PvPoke PvP ranking cache auto-update behavior
+
+PvPoke rankings are cached in SQLite table `pvp_rankings` for:
+
+- Great League: <https://pvpoke.com/rankings/all/1500/overall/>
+- Ultra League: <https://pvpoke.com/rankings/all/2500/overall/>
+- Master League: <https://pvpoke.com/rankings/all/10000/overall/>
+
+The cache is considered stale after `PVP_CACHE_MAX_AGE_DAYS` days, defaulting to 30. The bot stores the successful refresh timestamp in SQLite `cache_metadata` under cache name `pvp_rankings`. On startup, the bot initializes `pvp_rankings`, checks freshness, and starts a background refresh when `PVP_AUTO_UPDATE=true`. A recurring background task checks every `PVP_AUTO_UPDATE_CHECK_HOURS` hours. An update lock prevents overlapping refreshes.
+
+Normal Discord questions never scrape PvPoke live. `/pvp`, `/ask`, `/pokemon`, and @mention queries answer only from cached SQLite rows. Owner-only `/updatepvp`, background refresh, or manual `python pvp_update.py` are the update paths. If scraping fails or returns zero rows, existing cached rows are kept and `cache_metadata.last_updated` is not marked fresh.
+
+Examples:
+
+```text
+/pvp
+/pvp great
+/pvp ultra
+/pvp master
+/pvp great top 20
+/pvp best great league pokemon
+/pvp skarmory
+/pvp is azumarill good in great league
+```
+
+Owners can force a refresh with:
+
+```text
+/updatepvp
+```
+
+Run the PvP updater manually with:
+
+```bash
+python pvp_update.py
+```
+
 ### Raid attacker browser scraper config
 
 Pokémon GO Hub DB may return Cloudflare challenge pages to plain `requests`. The optional Playwright scraper is enabled by default because it is the practical automated path when the table is visible in a normal browser.
@@ -484,6 +527,10 @@ intents.message_content = True
 - `/ask query: best fire attacker` — raid-attacker questions are routed to cached raid attacker rankings first
 - `/eggs query: 1km` — show current cached 1 km egg hatches
 - `/eggs query: Larvesta` — show which cached egg pools include Larvesta
+- `/pvp` — show a compact PvP cache overview
+- `/pvp query: great` — show top cached Great League PvPoke rankings
+- `/pvp query: ultra top 20` — show up to 20 cached Ultra League rankings
+- `/pvp query: is azumarill good in great league` — search Azumarill in cached Great League rankings
 - `/raidattackers` — show top cached overall raid attackers
 - `/raidattackers query: fire` — show top cached Fire-type raid attackers
 - `/raidattackers query: best fire attacker` — ask against cached monthly raid attacker ranking data
@@ -494,6 +541,7 @@ intents.message_content = True
 - `/updatepokemon` — owner-only manual Pokémon GO Hub DB knowledge update
 - `/updateraidattackers` — owner-only manual raid attacker cache refresh
 - `/updateeggs` — owner-only manual egg pool cache refresh
+- `/updatepvp` — owner-only manual PvPoke ranking cache refresh
 - `/importpokemon` — owner-only import from `data/pokemon_knowledge_seed.csv` or `data/pokemon_knowledge_seed.json`
 - `@Pokemon GO AI Bot what raids are active?` — route to raid-related local events
 - `@Pokemon GO AI Bot when is the next community day?` — route to Community Day events

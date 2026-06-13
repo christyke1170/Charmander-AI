@@ -44,6 +44,11 @@ EGG_CACHE_MAX_AGE_DAYS = int(EGG_CACHE_MAX_AGE_DAYS_RAW) if EGG_CACHE_MAX_AGE_DA
 EGG_AUTO_UPDATE = os.getenv("EGG_AUTO_UPDATE", "true").strip().lower() in {"1", "true", "yes", "on"}
 EGG_AUTO_UPDATE_CHECK_HOURS_RAW = os.getenv("EGG_AUTO_UPDATE_CHECK_HOURS", "24").strip()
 EGG_AUTO_UPDATE_CHECK_HOURS = int(EGG_AUTO_UPDATE_CHECK_HOURS_RAW) if EGG_AUTO_UPDATE_CHECK_HOURS_RAW.isdigit() else 24
+PVP_CACHE_MAX_AGE_DAYS_RAW = os.getenv("PVP_CACHE_MAX_AGE_DAYS", "30").strip()
+PVP_CACHE_MAX_AGE_DAYS = int(PVP_CACHE_MAX_AGE_DAYS_RAW) if PVP_CACHE_MAX_AGE_DAYS_RAW.isdigit() else 30
+PVP_AUTO_UPDATE = os.getenv("PVP_AUTO_UPDATE", "true").strip().lower() in {"1", "true", "yes", "on"}
+PVP_AUTO_UPDATE_CHECK_HOURS_RAW = os.getenv("PVP_AUTO_UPDATE_CHECK_HOURS", "24").strip()
+PVP_AUTO_UPDATE_CHECK_HOURS = int(PVP_AUTO_UPDATE_CHECK_HOURS_RAW) if PVP_AUTO_UPDATE_CHECK_HOURS_RAW.isdigit() else 24
 
 
 def _env_bool(name: str, default: bool) -> bool:

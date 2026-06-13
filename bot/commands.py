@@ -19,6 +19,12 @@ from ai.egg_answerer import (
 )
 from ai.openai_client import is_openai_enabled
 from ai.pokemon_answerer import answer_mixed_query_with_llm, answer_pokemon_query, answer_pokemon_query_with_llm
+from ai.pvp_answerer import (
+    _requested_pvp_row_count,
+    answer_pvp_query_with_llm,
+    format_compact_pvp_rankings,
+    is_compact_pvp_response,
+)
 from ai.query_answerer import answer_query, answer_query_with_llm
 from ai.dynamax_answerer import (
     answer_dynamax_query_with_llm,
@@ -54,6 +60,12 @@ from database.dynamax_attackers_db import (
     search_dynamax_attackers,
 )
 from database.pokemon_db import find_pokemon_mentions, get_pokemon_meta_candidates, search_pokemon_knowledge
+from database.pvp_rankings_db import (
+    count_pvp_rankings,
+    get_top_pvp_rankings,
+    normalize_pvp_league,
+    search_pvp_rankings,
+)
 from database.raid_attackers_db import (
     count_raid_attacker_rankings,
     get_best_raid_attackers_across_types,
@@ -64,7 +76,7 @@ from database.raid_attackers_db import (
 )
 from pokemon_knowledge_import import import_pokemon_knowledge_seed
 from pokemon_knowledge_update import _format_zero_row_warning, run_pokemon_knowledge_update
-from raid_attacker_update import CACHE_NAME
+from raid_attacker_update import CACHE_NAME as RAID_ATTACKER_CACHE_NAME
 from weekly_update import run_update
 
 
@@ -149,10 +161,50 @@ EGG_INTENT_PATTERN = re.compile(
     r"\b(?:eggs?|hatch(?:es|ed|ing)?|hatched|hatches|adventure\s+sync|route\s+gift)\b",
     re.IGNORECASE,
 )
+PVP_CONTEXT_PATTERN = re.compile(
+    r"\b(?:pvp|pvpoke|great\s+league|ultra\s+league|master\s+league|gl|ul|ml|battle\s+league|go\s+battle\s+league|gbl|league\s+rankings|best\s+pvp\s+pokemon|best\s+great\s+league\s+pokemon|good\s+in\s+great\s+league|good\s+in\s+ultra\s+league|good\s+in\s+master\s+league)\b",
+    re.IGNORECASE,
+)
+PVP_RANKING_INTENT_PATTERN = re.compile(r"\b(?:best|top|rankings?|ranked|good|meta|pokemon|pokémon)\b", re.IGNORECASE)
+PVP_STOP_WORDS = {
+    "a",
+    "about",
+    "are",
+    "battle",
+    "best",
+    "can",
+    "for",
+    "gbl",
+    "give",
+    "gl",
+    "go",
+    "good",
+    "great",
+    "in",
+    "is",
+    "league",
+    "master",
+    "me",
+    "ml",
+    "pokemon",
+    "pokémon",
+    "pvp",
+    "pvpoke",
+    "rankings",
+    "ranking",
+    "show",
+    "should",
+    "the",
+    "top",
+    "ul",
+    "ultra",
+    "what",
+    "which",
+}
 
 
 def _raid_cache_notice(is_update_running: bool) -> str:
-    if is_update_running and is_cache_stale(CACHE_NAME, RAID_ATTACKER_CACHE_MAX_AGE_DAYS):
+    if is_update_running and is_cache_stale(RAID_ATTACKER_CACHE_NAME, RAID_ATTACKER_CACHE_MAX_AGE_DAYS):
         return "\n\n_Note: cached raid attacker data may be updating in the background._"
     return ""
 
@@ -291,6 +343,101 @@ def _is_egg_pool_query(query: str) -> bool:
     if _is_current_raid_event_query(normalized):
         return False
     return True
+
+
+def _is_pvp_query(query: str) -> bool:
+    """Return whether a natural-language query should use cached PvPoke rankings."""
+
+    normalized = query.lower().strip()
+    if not normalized:
+        return False
+    if _is_dynamax_query(normalized) or _is_raid_attacker_query(normalized) or _is_egg_pool_query(normalized):
+        return False
+    if _is_current_raid_event_query(normalized):
+        return False
+    if "raid" in normalized and not PVP_CONTEXT_PATTERN.search(normalized):
+        return False
+    if PVP_CONTEXT_PATTERN.search(normalized):
+        return True
+    league = normalize_pvp_league(normalized)
+    return bool(league and PVP_RANKING_INTENT_PATTERN.search(normalized))
+
+
+def _pvp_pokemon_candidate(query: str | None) -> str | None:
+    """Extract a likely Pokémon name from a PvP question."""
+
+    if not query:
+        return None
+    try:
+        mentions = find_pokemon_mentions(query, limit=1)
+    except Exception:
+        logger.debug("Could not use Pokémon knowledge mentions for PvP query parsing; falling back to text cleanup", exc_info=True)
+        mentions = []
+    if mentions:
+        mention = mentions[0]
+        if isinstance(mention, dict):
+            name = mention.get("pokemon_name") or mention.get("name")
+            if name:
+                return str(name)
+        if isinstance(mention, str):
+            return mention
+
+    text = query.replace("’", "'")
+    text = re.sub(r"\b(?:great|ultra|master)\s+league\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:go\s+battle\s+league|battle\s+league|league\s+rankings)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\btop\s+\d{1,3}\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d{1,3}\b", " ", text)
+    text = re.sub(r"[?!.:,;()\[\]{}]", " ", text)
+    tokens = [token for token in re.split(r"\s+", text.strip()) if token]
+    candidate_tokens = [token for token in tokens if token.lower() not in PVP_STOP_WORDS]
+    candidate = re.sub(r"\s+", " ", " ".join(candidate_tokens)).strip()
+    return candidate if len(candidate) >= 2 else None
+
+
+def get_pvp_rows_for_query(query: str, limit: int = 20) -> tuple[list[dict], str, str | None]:
+    """Return cached PvPoke rows for a query, route used, and normalized league."""
+
+    normalized = (query or "").strip().lower()
+    league = normalize_pvp_league(normalized)
+    safe_limit = max(1, min(int(limit), 20))
+    if not normalized:
+        return [], "overview", None
+
+    candidate = _pvp_pokemon_candidate(normalized)
+    if candidate:
+        rows = search_pvp_rankings(candidate, league=league, limit=safe_limit)
+        if rows:
+            return rows, "pokemon_search", league
+
+    if league:
+        return get_top_pvp_rankings(league, limit=safe_limit), f"league:{league}", league
+
+    if "pvp" in normalized or "pvpoke" in normalized or "gbl" in normalized or "battle league" in normalized:
+        return [], "overview", None
+
+    if candidate:
+        rows = search_pvp_rankings(candidate, league=None, limit=safe_limit)
+        if rows:
+            return rows, "pokemon_search", None
+    return [], "overview", None
+
+
+def build_pvp_response(query: str | None, rows: list[dict], route: str, league: str | None) -> str:
+    """Return a user-facing response from cached PvPoke data only."""
+
+    if count_pvp_rankings() == 0:
+        return "The PvP ranking cache is empty. Ask the bot owner to run `/updatepvp`."
+    if route != "overview" and not rows:
+        return "No matching cached PvPoke rankings were found.\nSource: cached PvPoke rankings."
+
+    requested_count = _requested_pvp_row_count(query)
+    compact_answer = format_compact_pvp_rankings(query, rows, league, route, max_rows=requested_count)
+    if is_openai_enabled() and rows:
+        llm_answer = answer_pvp_query_with_llm(query or "pvp rankings", rows, league, route, compact_answer)
+        if is_compact_pvp_response(llm_answer, query, requested_count, MAX_DISCORD_MESSAGE_LENGTH):
+            return llm_answer[:MAX_DISCORD_MESSAGE_LENGTH]
+        logger.debug("PvP LLM response did not satisfy compact Discord format; using compact fallback formatter")
+    return compact_answer[:MAX_DISCORD_MESSAGE_LENGTH]
 
 
 def _detect_egg_distance(query: str | None) -> int | None:
@@ -596,6 +743,11 @@ def build_mention_response(
     if _is_egg_pool_query(query):
         return build_egg_response(query), "eggs", count_egg_pool_rows()
 
+    if _is_pvp_query(query):
+        pvp_count = _requested_pvp_row_count(query)
+        rows, route, league = get_pvp_rows_for_query(query, limit=pvp_count)
+        return build_pvp_response(query, rows, route, league), "pvp", len(rows)
+
     if _is_current_raid_event_query(query):
         route, heading, events = route_mention_query(query)
         if not events:
@@ -686,6 +838,7 @@ def register_commands(
     raid_cache_manager: Any | None = None,
     egg_cache_manager: Any | None = None,
     dynamax_cache_manager: Any | None = None,
+    pvp_cache_manager: Any | None = None,
 ) -> None:
     """Register all application commands on a command tree."""
 
@@ -752,6 +905,16 @@ def register_commands(
         answer = await asyncio.to_thread(build_egg_response, query)
         await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
 
+    @tree.command(name="pvp", description="Ask about cached PvPoke Great/Ultra/Master League rankings.")
+    @app_commands.describe(query="Example: great, ultra top 20, skarmory, is azumarill good in great league")
+    async def pvp_command(interaction: discord.Interaction, query: str = ""):
+        logger.info("Slash command invoked: /pvp by user_id=%s", interaction.user.id)
+        await interaction.response.defer(ephemeral=False, thinking=True)
+        rows, route, league = get_pvp_rows_for_query(query, limit=_requested_pvp_row_count(query))
+        logger.info("/pvp returned %d row(s) for query=%r via route=%s league=%s", len(rows), query, route, league)
+        answer = await asyncio.to_thread(build_pvp_response, query, rows, route, league)
+        await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
+
     @tree.command(name="communityday", description="Show upcoming Community Day related events.")
     async def community_day_command(interaction: discord.Interaction):
         logger.info("Slash command invoked: /communityday by user_id=%s", interaction.user.id)
@@ -804,6 +967,13 @@ def register_commands(
         if _is_egg_pool_query(query):
             logger.info("/ask routed to cached egg pools for query=%r", query)
             answer = await asyncio.to_thread(build_egg_response, query)
+            await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
+            return
+
+        if _is_pvp_query(query):
+            pvp_rows, route, league = get_pvp_rows_for_query(query, limit=_requested_pvp_row_count(query))
+            logger.info("/ask routed to cached PvPoke rankings and returned %d row(s) for query=%r via route=%s league=%s", len(pvp_rows), query, route, league)
+            answer = await asyncio.to_thread(build_pvp_response, query, pvp_rows, route, league)
             await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
             return
 
@@ -864,6 +1034,13 @@ def register_commands(
             logger.info("/pokemon routed to raid attacker rankings and returned %d row(s) for query=%r via route=%s", len(raid_rows), query, route)
             is_running = bool(raid_cache_manager and raid_cache_manager.is_update_running)
             answer = await asyncio.to_thread(build_raid_attacker_response, query, raid_rows, is_running, route)
+            await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
+            return
+
+        if _is_pvp_query(query):
+            pvp_rows, route, league = get_pvp_rows_for_query(query, limit=_requested_pvp_row_count(query))
+            logger.info("/pokemon routed to cached PvPoke rankings and returned %d row(s) for query=%r via route=%s league=%s", len(pvp_rows), query, route, league)
+            answer = await asyncio.to_thread(build_pvp_response, query, pvp_rows, route, league)
             await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
             return
 
@@ -928,6 +1105,42 @@ def register_commands(
             await interaction.followup.send("A raid attacker update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
         else:
             await interaction.followup.send("Raid attacker update failed. Existing cached data was kept.", ephemeral=True, suppress_embeds=True)
+
+    @tree.command(name="updatepvp", description="Owner-only: force refresh cached PvPoke rankings.")
+    async def update_pvp_command(interaction: discord.Interaction):
+        logger.info("Slash command invoked: /updatepvp by user_id=%s", interaction.user.id)
+        if owner_id is None or interaction.user.id != owner_id:
+            await interaction.response.send_message("This owner-only command can only be run by the configured bot owner.", ephemeral=True, suppress_embeds=True)
+            return
+        if pvp_cache_manager is not None and pvp_cache_manager.is_update_running:
+            await interaction.response.send_message("A PvP ranking update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
+            return
+        if pvp_cache_manager is None:
+            await interaction.response.send_message("PvP cache manager is not available.", ephemeral=True, suppress_embeds=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await pvp_cache_manager.force_refresh(reason="manual", wait_for_lock=False)
+        league_rows = result.stats.get("league_rows", {}) if result.stats else {}
+        scraper_stage = result.stats.get("scraper_stage", "unknown") if result.stats else "unknown"
+        metadata_updated = result.stats.get("metadata_updated", False) if result.stats else result.updated
+        errors = result.stats.get("errors", []) if result.stats else []
+        if result.updated:
+            await interaction.followup.send(
+                f"PvP update complete. Upserted {result.count} row(s). League rows: {league_rows}. Scraper stage: {scraper_stage}. Metadata updated: {metadata_updated}. Errors: {errors}.",
+                ephemeral=True,
+                suppress_embeds=True,
+            )
+        elif result.reason == "zero-rows":
+            await interaction.followup.send(
+                f"PvP update finished but returned zero rows. Existing cached data was kept and metadata was not marked fresh. League rows: {league_rows}. Scraper stage: {scraper_stage}. Errors: {errors}.",
+                ephemeral=True,
+                suppress_embeds=True,
+            )
+        elif result.reason == "already-running":
+            await interaction.followup.send("A PvP ranking update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
+        else:
+            await interaction.followup.send(f"PvP update failed. Existing cached data was kept. Errors: {errors}.", ephemeral=True, suppress_embeds=True)
 
     @tree.command(name="updatedynamax", description="Owner-only: force refresh cached Dynamax attacker data.")
     async def update_dynamax_command(interaction: discord.Interaction):

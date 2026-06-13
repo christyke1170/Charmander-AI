@@ -13,3 +13,7 @@ data/raid_attackers_seed.csv
 data/dynamax_attackers.csv
 data/playwright-profile/
 data/playwright-dynamax-profile/
+
+debug/pvpoke_*.html
+debug/pvpoke_*.txt
+debug/pvpoke_*.png
