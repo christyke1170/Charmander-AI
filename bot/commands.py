@@ -17,6 +17,7 @@ from ai.egg_answerer import (
     format_egg_pool_response,
     format_egg_pokemon_response,
 )
+from ai.general_chat_answerer import answer_general_chat_query, maybe_add_charmander_suffix
 from ai.openai_client import is_openai_enabled
 from ai.pokemon_answerer import answer_mixed_query_with_llm, answer_pokemon_query, answer_pokemon_query_with_llm
 from ai.pvp_answerer import (
@@ -26,6 +27,7 @@ from ai.pvp_answerer import (
     is_compact_pvp_response,
 )
 from ai.query_answerer import answer_query, answer_query_with_llm
+from ai.wiki_answerer import answer_wiki_query_with_llm, format_wiki_search_fallback
 from ai.dynamax_answerer import (
     answer_dynamax_query_with_llm,
     format_compact_dynamax_attacker_rows,
@@ -66,6 +68,7 @@ from database.pvp_rankings_db import (
     normalize_pvp_league,
     search_pvp_rankings,
 )
+from database.wiki_knowledge_db import count_wiki_chunks, search_wiki_chunks
 from database.raid_attackers_db import (
     count_raid_attacker_rankings,
     get_best_raid_attackers_across_types,
@@ -166,6 +169,32 @@ PVP_CONTEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PVP_RANKING_INTENT_PATTERN = re.compile(r"\b(?:best|top|rankings?|ranked|good|meta|pokemon|pokémon)\b", re.IGNORECASE)
+WIKI_KNOWLEDGE_PATTERN = re.compile(
+    r"\b(?:"
+    r"shin(?:y|ies)|shiny\s+pokemon|shiny\s+pokémon|lucky\s+pokemon|lucky\s+pokémon|lucky\s+trade|lucky\s+friends?|"
+    r"shadow\s+pokemon|shadow\s+pokémon|purified\s+pokemon|purified\s+pokémon|mega\s+evolution|"
+    r"dynamax|gigantamax|max\s+battles?|trading|buddy(?:\s+pokemon|\s+pokémon)?|adventure\s+sync|routes?|"
+    r"team\s+go\s+rocket|team\s+rocket|rocket|go\s+battle\s+league|gbl|community\s+day|"
+    r"field\s+research|special\s+research|timed\s+research|showcases?|pokestop\s+showcase|pokéstop\s+showcase"
+    r")\b",
+    re.IGNORECASE,
+)
+WIKI_EXPLANATION_PATTERN = re.compile(r"\b(?:what|how|why|can|does|do|tell|details?|explain|work|works)\b", re.IGNORECASE)
+GENERIC_EVENT_SEARCH_PATTERN = re.compile(
+    r"\b(?:community\s+day|comm\s+day|spotlight\s+hour|event|events|season|raid|raids)\b",
+    re.IGNORECASE,
+)
+EVENT_TIMING_PATTERN = re.compile(
+    r"\b(?:today|active|currently|right\s+now|upcoming|next|this\s+week|weekend|schedule|when)\b",
+    re.IGNORECASE,
+)
+POKEMON_GO_TOPIC_PATTERN = re.compile(
+    r"\b(?:pokemon\s+go|pokémon\s+go|community\s+day|comm\s+day|raids?|raid\s+hour|raid\s+day|mega\s+evolution|eggs?|hatch(?:es|ed|ing)?|great\s+league|ultra\s+league|master\s+league|gbl|go\s+battle\s+league|battle\s+league|team\s+go\s+rocket|team\s+rocket|rocket|buddy|routes?|field\s+research|special\s+research|timed\s+research|pokestop|pokéstop|gym|dynamax|gigantamax|max\s+battles?|shiny)\b",
+    re.IGNORECASE,
+)
+POKEMON_GO_GENERAL_CHAT_PREFIX = (
+    "I don't have that cached yet. I can answer generally, but for Pokémon GO-specific facts I’m more reliable when the wiki/table cache has the topic."
+)
 PVP_STOP_WORDS = {
     "a",
     "about",
@@ -323,12 +352,64 @@ def _is_dynamax_query(query: str) -> bool:
     normalized = query.lower().strip()
     if not normalized:
         return False
+    if re.search(r"\b(?:what\s+(?:is|are)|how\s+(?:does|do)|tell\s+me\s+about|explain|details?\s+about)\b", normalized):
+        has_ranking_intent = bool(ATTACKER_WORD_PATTERN.search(normalized) or RANKING_LANGUAGE_PATTERN.search(normalized))
+        if re.search(r"\b(?:dynamax|gigantamax|max\s+battles?)\b", normalized) and not has_ranking_intent:
+            return False
     return bool(DYNAMAX_CONTEXT_PATTERN.search(normalized))
 
 
 def _is_event_specific_query(query: str) -> bool:
     normalized = query.lower()
     return any(term in normalized for term in EVENT_QUERY_TERMS)
+
+
+def _should_try_generic_event_search(query: str) -> bool:
+    """Return whether a query should fall through to cached event/news search."""
+
+    normalized = query.lower().strip()
+    if not normalized:
+        return False
+    if _is_current_raid_event_query(normalized):
+        return True
+    if not GENERIC_EVENT_SEARCH_PATTERN.search(normalized):
+        return False
+    return bool(EVENT_TIMING_PATTERN.search(normalized) or _is_event_specific_query(normalized))
+
+
+def _is_pokemon_go_topic_query(query: str) -> bool:
+    """Return whether a query looks Pokémon GO-specific even if no cache matched."""
+
+    normalized = query.lower().strip()
+    if not normalized:
+        return False
+    if _is_dynamax_query(normalized) or _is_raid_attacker_query(normalized) or _is_egg_pool_query(normalized) or _is_pvp_query(normalized):
+        return True
+    if _is_current_raid_event_query(normalized) or _is_wiki_knowledge_query(normalized):
+        return True
+    return bool(POKEMON_GO_TOPIC_PATTERN.search(normalized))
+
+
+def _event_cache_miss_message(query: str) -> str:
+    if _is_current_raid_event_query(query):
+        return "I couldn’t find current local raid event data for that yet. Try `/raids` or run `/update` if you are the bot owner."
+    return "I couldn’t find matching local Pokémon GO event data for that yet. Try `/events` to see the latest stored events, or run `/update` if you are the bot owner."
+
+
+def _build_general_chat_response(query: str, *, allow_suffix: bool = True) -> str:
+    """Return a conversational response with Charmander flavor and safe GO honesty."""
+
+    context: str | None = None
+    pokemon_go_topic = _is_pokemon_go_topic_query(query)
+    if pokemon_go_topic:
+        context = (
+            "This query appears Pokémon GO-specific, but no cached table/wiki route produced a result. "
+            "Be honest about the cache miss, do not invent exact current Pokémon GO data, and do not claim live web access unless a web/search provider is configured."
+        )
+    answer = answer_general_chat_query(query, context=context)
+    if pokemon_go_topic and POKEMON_GO_GENERAL_CHAT_PREFIX not in answer:
+        answer = f"{POKEMON_GO_GENERAL_CHAT_PREFIX}\n\n{answer}"
+    return maybe_add_charmander_suffix(answer[:MAX_DISCORD_MESSAGE_LENGTH], allow_suffix=allow_suffix)[:MAX_DISCORD_MESSAGE_LENGTH]
 
 
 def _is_egg_pool_query(query: str) -> bool:
@@ -351,6 +432,9 @@ def _is_pvp_query(query: str) -> bool:
     normalized = query.lower().strip()
     if not normalized:
         return False
+    if re.search(r"\b(?:what\s+(?:is|are)|how\s+(?:does|do)|tell\s+me\s+about|explain|details?\s+about)\b", normalized):
+        if re.search(r"\b(?:go\s+battle\s+league|gbl|battle\s+league)\b", normalized):
+            return False
     if _is_dynamax_query(normalized) or _is_raid_attacker_query(normalized) or _is_egg_pool_query(normalized):
         return False
     if _is_current_raid_event_query(normalized):
@@ -361,6 +445,24 @@ def _is_pvp_query(query: str) -> bool:
         return True
     league = normalize_pvp_league(normalized)
     return bool(league and PVP_RANKING_INTENT_PATTERN.search(normalized))
+
+
+def _is_wiki_knowledge_query(query: str) -> bool:
+    """Return whether a query should use cached Pokémon GO Wiki/Fandom knowledge."""
+
+    normalized = query.lower().strip()
+    if not normalized:
+        return False
+    if _is_dynamax_query(normalized) or _is_raid_attacker_query(normalized) or _is_egg_pool_query(normalized) or _is_pvp_query(normalized):
+        return False
+    if _is_current_raid_event_query(normalized):
+        return False
+    if not WIKI_KNOWLEDGE_PATTERN.search(normalized):
+        return False
+    if WIKI_EXPLANATION_PATTERN.search(normalized):
+        return True
+    # Slash /wiki should always search. Mention routing should accept concise topic-only queries too.
+    return len(normalized.split()) <= 5
 
 
 def _pvp_pokemon_candidate(query: str | None) -> str | None:
@@ -526,6 +628,20 @@ def build_egg_response(query: str | None = None) -> str:
         return fallback[:MAX_DISCORD_MESSAGE_LENGTH]
 
     return format_egg_overview(get_all_egg_pool_sections())[:MAX_DISCORD_MESSAGE_LENGTH]
+
+
+def build_wiki_response(query: str | None = None) -> str:
+    """Return a Discord-ready answer from cached Pokémon GO Wiki chunks only."""
+
+    normalized = (query or "").strip()
+    if not normalized:
+        return "Ask a Pokémon GO Wiki question like `/wiki shiny pokemon`, `/wiki lucky pokemon`, or `/wiki how does mega evolution work`."
+    chunks = search_wiki_chunks(normalized, limit=8)
+    if not chunks:
+        return "I couldn’t find that in the cached Pokémon GO Wiki data. Ask the bot owner to update the wiki cache or add that page to the seed list."
+    if is_openai_enabled():
+        return answer_wiki_query_with_llm(normalized, chunks)[:MAX_DISCORD_MESSAGE_LENGTH]
+    return format_wiki_search_fallback(normalized, chunks)[:MAX_DISCORD_MESSAGE_LENGTH]
 
 
 def _event_context(events: list[dict[str, Any]]) -> str:
@@ -761,31 +877,35 @@ def build_mention_response(
         return build_event_response(heading, events, "No matching local raid event data found."), route, len(events)
 
     pokemon_specific = _is_pokemon_specific_query(query)
-    event_specific = _is_event_specific_query(query)
+    event_search_query = _should_try_generic_event_search(query)
     if pokemon_specific:
         pokemon_rows = get_pokemon_meta_candidates(query, limit=10)
-        if event_specific:
+        if event_search_query:
             _, _, events = route_mention_query(query)
-            if is_openai_enabled():
+            if pokemon_rows and events and is_openai_enabled():
                 answer = answer_mixed_query_with_llm(query, _event_context(events), pokemon_rows)
                 return answer[:MAX_DISCORD_MESSAGE_LENGTH], "mixed", len(events) + len(pokemon_rows)
-        if not pokemon_rows:
-            return "I couldn’t find matching local Pokémon knowledge for that. Ask the bot owner to run `/updatepokemon`.", "pokemon", 0
-        if is_openai_enabled():
-            return answer_pokemon_query_with_llm(query, pokemon_rows)[:MAX_DISCORD_MESSAGE_LENGTH], "pokemon", len(pokemon_rows)
-        return answer_pokemon_query(query, pokemon_rows)[:MAX_DISCORD_MESSAGE_LENGTH], "pokemon", len(pokemon_rows)
+        if pokemon_rows:
+            if is_openai_enabled():
+                return answer_pokemon_query_with_llm(query, pokemon_rows)[:MAX_DISCORD_MESSAGE_LENGTH], "pokemon", len(pokemon_rows)
+            return answer_pokemon_query(query, pokemon_rows)[:MAX_DISCORD_MESSAGE_LENGTH], "pokemon", len(pokemon_rows)
 
-    route, heading, events = route_mention_query(query)
-    if not events:
-        return (
-            "I couldn’t find matching local Pokémon GO event data for that yet. "
-            "Try `/events` to see the latest stored events, or run `/update` if you are the bot owner.",
-            route,
-            0,
-        )
-    if is_openai_enabled():
-        return answer_query_with_llm(query, events)[:MAX_DISCORD_MESSAGE_LENGTH], route, len(events)
-    return build_event_response(heading, events, "No matching local event data found."), route, len(events)
+    if _is_wiki_knowledge_query(query):
+        chunks = search_wiki_chunks(query, limit=8)
+        if chunks:
+            if is_openai_enabled():
+                return answer_wiki_query_with_llm(query, chunks)[:MAX_DISCORD_MESSAGE_LENGTH], "wiki", len(chunks)
+            return format_wiki_search_fallback(query, chunks)[:MAX_DISCORD_MESSAGE_LENGTH], "wiki", len(chunks)
+
+    if event_search_query:
+        route, heading, events = route_mention_query(query)
+        if not events:
+            return _event_cache_miss_message(query), route, 0
+        if is_openai_enabled():
+            return answer_query_with_llm(query, events)[:MAX_DISCORD_MESSAGE_LENGTH], route, len(events)
+        return build_event_response(heading, events, "No matching local event data found."), route, len(events)
+
+    return _build_general_chat_response(query), "general_chat", 1
 
 
 def build_contextual_mention_response(
@@ -839,6 +959,7 @@ def register_commands(
     egg_cache_manager: Any | None = None,
     dynamax_cache_manager: Any | None = None,
     pvp_cache_manager: Any | None = None,
+    wiki_cache_manager: Any | None = None,
 ) -> None:
     """Register all application commands on a command tree."""
 
@@ -915,6 +1036,14 @@ def register_commands(
         answer = await asyncio.to_thread(build_pvp_response, query, rows, route, league)
         await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
 
+    @tree.command(name="wiki", description="Ask about cached Pokémon GO Wiki/Fandom knowledge.")
+    @app_commands.describe(query="Example: shiny pokemon, lucky pokemon, how does mega evolution work")
+    async def wiki_command(interaction: discord.Interaction, query: str):
+        logger.info("Slash command invoked: /wiki by user_id=%s", interaction.user.id)
+        await interaction.response.defer(ephemeral=False, thinking=True)
+        answer = await asyncio.to_thread(build_wiki_response, query)
+        await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
+
     @tree.command(name="communityday", description="Show upcoming Community Day related events.")
     async def community_day_command(interaction: discord.Interaction):
         logger.info("Slash command invoked: /communityday by user_id=%s", interaction.user.id)
@@ -980,6 +1109,9 @@ def register_commands(
         if _is_current_raid_event_query(query):
             route, _heading, events = route_mention_query(query)
             logger.info("/ask routed to current raid event data via route=%s and returned %d row(s) for query=%r", route, len(events), query)
+            if not events:
+                await interaction.followup.send(_event_cache_miss_message(query), ephemeral=False, suppress_embeds=True)
+                return
             if is_openai_enabled():
                 answer = await asyncio.to_thread(answer_query_with_llm, query, events)
             else:
@@ -990,19 +1122,45 @@ def register_commands(
         if _is_pokemon_specific_query(query):
             pokemon_rows = get_pokemon_meta_candidates(query, limit=10)
             logger.info("/ask routed to Pokémon knowledge and returned %d row(s) for query=%r", len(pokemon_rows), query)
+            if pokemon_rows:
+                if is_openai_enabled():
+                    answer = await asyncio.to_thread(answer_pokemon_query_with_llm, query, pokemon_rows)
+                else:
+                    answer = answer_pokemon_query(query, pokemon_rows)
+                await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
+                return
+
+        if _is_wiki_knowledge_query(query):
+            logger.info("/ask routed to cached wiki knowledge for query=%r", query)
+            chunks = search_wiki_chunks(query, limit=8)
+            if chunks:
+                answer = await asyncio.to_thread(build_wiki_response, query)
+                await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
+                return
+
+        if _should_try_generic_event_search(query):
+            route, heading, events = route_mention_query(query)
+            logger.info("/ask routed to cached event search via route=%s and returned %d row(s) for query=%r", route, len(events), query)
+            if not events:
+                await interaction.followup.send(_event_cache_miss_message(query), ephemeral=False, suppress_embeds=True)
+                return
             if is_openai_enabled():
-                answer = await asyncio.to_thread(answer_pokemon_query_with_llm, query, pokemon_rows)
+                answer = await asyncio.to_thread(answer_query_with_llm, query, events)
             else:
-                answer = answer_pokemon_query(query, pokemon_rows)
+                answer = build_event_response(heading, events, "No matching local event data found.")
             await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
             return
 
-        events = search_events(query, limit=10)
-        logger.info("/ask returned %d event(s) for query=%r", len(events), query)
-        if is_openai_enabled():
-            answer = await asyncio.to_thread(answer_query_with_llm, query, events)
-        else:
-            answer = answer_query(query, events)
+        logger.info("/ask fell back to general chat for query=%r", query)
+        answer = await asyncio.to_thread(_build_general_chat_response, query)
+        await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
+
+    @tree.command(name="chat", description="Chat normally with Charmander using general AI chat.")
+    @app_commands.describe(message="What do you want to chat about?")
+    async def chat_command(interaction: discord.Interaction, message: str):
+        logger.info("Slash command invoked: /chat by user_id=%s", interaction.user.id)
+        await interaction.response.defer(ephemeral=False, thinking=True)
+        answer = await asyncio.to_thread(_build_general_chat_response, message)
         await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
 
     @tree.command(name="aistatus", description="Show whether OpenAI AI answers are configured.")
@@ -1141,6 +1299,43 @@ def register_commands(
             await interaction.followup.send("A PvP ranking update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
         else:
             await interaction.followup.send(f"PvP update failed. Existing cached data was kept. Errors: {errors}.", ephemeral=True, suppress_embeds=True)
+
+    @tree.command(name="updatewiki", description="Owner-only: force refresh cached Pokémon GO Wiki knowledge.")
+    async def update_wiki_command(interaction: discord.Interaction):
+        logger.info("Slash command invoked: /updatewiki by user_id=%s", interaction.user.id)
+        if owner_id is None or interaction.user.id != owner_id:
+            await interaction.response.send_message("This owner-only command can only be run by the configured bot owner.", ephemeral=True, suppress_embeds=True)
+            return
+        if wiki_cache_manager is not None and wiki_cache_manager.is_update_running:
+            await interaction.response.send_message("A wiki knowledge update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
+            return
+        if wiki_cache_manager is None:
+            await interaction.response.send_message("Wiki cache manager is not available.", ephemeral=True, suppress_embeds=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await wiki_cache_manager.force_refresh(reason="manual", wait_for_lock=False)
+        pages_fetched = result.stats.get("pages_fetched", 0) if result.stats else 0
+        pages_failed = result.stats.get("pages_failed", 0) if result.stats else 0
+        chunks_created = result.stats.get("chunks_created", result.count) if result.stats else result.count
+        metadata_updated = result.stats.get("metadata_updated", False) if result.stats else result.updated
+        errors = result.stats.get("errors", []) if result.stats else []
+        if result.updated:
+            await interaction.followup.send(
+                f"Wiki update complete. Pages fetched: {pages_fetched}, pages failed: {pages_failed}, chunks created: {chunks_created}, metadata updated: {metadata_updated}. Errors: {errors}.",
+                ephemeral=True,
+                suppress_embeds=True,
+            )
+        elif result.reason == "zero-rows":
+            await interaction.followup.send(
+                f"Wiki update finished but returned zero chunks. Existing cached data was kept and metadata was not marked fresh. Pages fetched: {pages_fetched}, pages failed: {pages_failed}. Errors: {errors}.",
+                ephemeral=True,
+                suppress_embeds=True,
+            )
+        elif result.reason == "already-running":
+            await interaction.followup.send("A wiki knowledge update is already in progress. Please try again in a few minutes.", ephemeral=True, suppress_embeds=True)
+        else:
+            await interaction.followup.send(f"Wiki update failed. Existing cached data was kept. Errors: {errors}.", ephemeral=True, suppress_embeds=True)
 
     @tree.command(name="updatedynamax", description="Owner-only: force refresh cached Dynamax attacker data.")
     async def update_dynamax_command(interaction: discord.Interaction):

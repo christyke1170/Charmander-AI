@@ -49,6 +49,14 @@ PVP_CACHE_MAX_AGE_DAYS = int(PVP_CACHE_MAX_AGE_DAYS_RAW) if PVP_CACHE_MAX_AGE_DA
 PVP_AUTO_UPDATE = os.getenv("PVP_AUTO_UPDATE", "true").strip().lower() in {"1", "true", "yes", "on"}
 PVP_AUTO_UPDATE_CHECK_HOURS_RAW = os.getenv("PVP_AUTO_UPDATE_CHECK_HOURS", "24").strip()
 PVP_AUTO_UPDATE_CHECK_HOURS = int(PVP_AUTO_UPDATE_CHECK_HOURS_RAW) if PVP_AUTO_UPDATE_CHECK_HOURS_RAW.isdigit() else 24
+WIKI_CACHE_MAX_AGE_DAYS_RAW = os.getenv("WIKI_CACHE_MAX_AGE_DAYS", "30").strip()
+WIKI_CACHE_MAX_AGE_DAYS = int(WIKI_CACHE_MAX_AGE_DAYS_RAW) if WIKI_CACHE_MAX_AGE_DAYS_RAW.isdigit() else 30
+WIKI_AUTO_UPDATE = os.getenv("WIKI_AUTO_UPDATE", "true").strip().lower() in {"1", "true", "yes", "on"}
+WIKI_AUTO_UPDATE_CHECK_HOURS_RAW = os.getenv("WIKI_AUTO_UPDATE_CHECK_HOURS", "24").strip()
+WIKI_AUTO_UPDATE_CHECK_HOURS = int(WIKI_AUTO_UPDATE_CHECK_HOURS_RAW) if WIKI_AUTO_UPDATE_CHECK_HOURS_RAW.isdigit() else 24
+WEB_SEARCH_PROVIDER = os.getenv("WEB_SEARCH_PROVIDER", "none").strip().lower() or "none"
+GOOGLE_CSE_API_KEY = os.getenv("GOOGLE_CSE_API_KEY", "").strip()
+GOOGLE_CSE_ENGINE_ID = os.getenv("GOOGLE_CSE_ENGINE_ID", "").strip()
 
 
 def _env_bool(name: str, default: bool) -> bool:

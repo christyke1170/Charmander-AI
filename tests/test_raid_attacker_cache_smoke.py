@@ -22,6 +22,7 @@ import dynamax_import
 import dynamax_update
 import raid_attacker_import
 import raid_attacker_update
+from ai.general_chat_answerer import maybe_add_charmander_suffix
 from ai.raid_attacker_answerer import _requested_row_count
 from bot.commands import (
     MAX_DISCORD_MESSAGE_LENGTH,
@@ -29,6 +30,8 @@ from bot.commands import (
     _is_egg_pool_query,
     _is_current_raid_event_query,
     _is_raid_attacker_query,
+    _should_try_generic_event_search,
+    build_mention_response,
     build_dynamax_attacker_response,
     build_egg_response,
     build_contextual_mention_response,
@@ -40,6 +43,7 @@ from bot.commands import (
 )
 from bot.raid_attacker_cache import RaidAttackerCacheManager
 from database.cache_metadata import get_cache_metadata, init_cache_metadata_table, is_cache_stale, update_cache_metadata
+from database.db import init_db, upsert_event
 from database.egg_pool_db import (
     get_all_egg_pool_sections,
     get_egg_pools_by_distance,
@@ -54,6 +58,8 @@ from database.dynamax_attackers_db import (
     init_dynamax_attacker_tables,
     upsert_dynamax_attackers,
 )
+from database.pokemon_db import init_pokemon_tables
+from database.pvp_rankings_db import init_pvp_ranking_tables, upsert_pvp_rankings
 from database.raid_attackers_db import (
     get_best_raid_attackers_across_types,
     get_top_raid_attackers,
@@ -61,6 +67,7 @@ from database.raid_attackers_db import (
     init_raid_attacker_tables,
     upsert_raid_attacker_rankings,
 )
+from database.wiki_knowledge_db import SOURCE_NAME as WIKI_SOURCE_NAME, init_wiki_knowledge_tables, upsert_wiki_chunks, upsert_wiki_pages
 from raid_attacker_import import EXAMPLE_DATA_WARNING, import_raid_attacker_seed
 from raid_attacker_update import CACHE_NAME, run_raid_attacker_update
 from scraper.raid_attacker_scraper import (
@@ -122,9 +129,13 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.json_patch.stop)
 
         init_cache_metadata_table()
+        init_db()
         init_raid_attacker_tables()
         init_dynamax_attacker_tables()
         init_egg_pool_tables()
+        init_pvp_ranking_tables()
+        init_pokemon_tables()
+        init_wiki_knowledge_tables()
 
     def _seed_rankings(self) -> None:
         scraped_at = datetime.now(timezone.utc).isoformat()
@@ -332,6 +343,71 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
         upsert_raid_attacker_rankings(rows)
 
+    def _seed_pvp_rankings(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        upsert_pvp_rankings(
+            [
+                {
+                    "source": "test",
+                    "league": "great",
+                    "league_cp": 1500,
+                    "rank": 1,
+                    "pokemon_name": "Azumarill",
+                    "type_1": "Water",
+                    "type_2": "Fairy",
+                    "fast_move": "Bubble",
+                    "charged_move_1": "Ice Beam",
+                    "charged_move_2": "Play Rough",
+                    "score": "97.2",
+                    "url": "https://pvpoke.com/rankings/all/1500/overall/",
+                    "scraped_at": scraped_at,
+                }
+            ]
+        )
+
+    def _seed_shiny_wiki(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        upsert_wiki_pages(
+            [
+                {
+                    "source": WIKI_SOURCE_NAME,
+                    "title": "Shiny Pokémon",
+                    "url": "https://pokemongo.fandom.com/wiki/Shiny_Pok%C3%A9mon",
+                    "summary": "Shiny Pokémon are alternate-colored Pokémon.",
+                    "scraped_at": scraped_at,
+                }
+            ]
+        )
+        upsert_wiki_chunks(
+            [
+                {
+                    "source": WIKI_SOURCE_NAME,
+                    "page_title": "Shiny Pokémon",
+                    "url": "https://pokemongo.fandom.com/wiki/Shiny_Pok%C3%A9mon",
+                    "section_title": "Overview",
+                    "chunk_index": 0,
+                    "content": "Shiny Pokémon are alternate-colored Pokémon in Pokémon GO.",
+                    "scraped_at": scraped_at,
+                }
+            ]
+        )
+
+    def _seed_raid_event(self) -> None:
+        now = datetime.now(timezone.utc)
+        upsert_event(
+            {
+                "source": "test",
+                "title": "Current 5-Star Raids",
+                "category": "Raid",
+                "start_time": (now - timedelta(hours=2)).isoformat(),
+                "end_time": (now + timedelta(hours=2)).isoformat(),
+                "url": "https://example.invalid/raids",
+                "summary": "Current 5-star raids are active right now.",
+                "raw_text": "Current 5-star raids are active right now.",
+                "scraped_at": now.isoformat(),
+            }
+        )
+
     def _compact_numbered_rows(self, response: str) -> list[str]:
         return [line for line in response.splitlines() if re.match(r"^\d+\. ", line)]
 
@@ -505,6 +581,87 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(query=query):
                 self.assertTrue(_is_current_raid_event_query(query))
                 self.assertFalse(_is_raid_attacker_query(query))
+
+    def test_generic_event_search_detection_requires_event_context_not_generic_chat(self) -> None:
+        self.assertFalse(_should_try_generic_event_search("tell me a joke"))
+        self.assertFalse(_should_try_generic_event_search("what is hotpot"))
+        self.assertFalse(_should_try_generic_event_search("do you like rain"))
+        self.assertTrue(_should_try_generic_event_search("when is the next community day"))
+
+    def test_general_chat_route_triggers_for_normal_queries(self) -> None:
+        queries = [
+            "tell me a joke",
+            "what is your favorite pokemon",
+            "do you like rain",
+            "what is hotpot",
+        ]
+
+        with mock.patch("bot.commands.answer_general_chat_query", side_effect=lambda query, context=None: f"general::{query}"), mock.patch(
+            "bot.commands.maybe_add_charmander_suffix", side_effect=lambda text, allow_suffix=True: text
+        ):
+            for query in queries:
+                with self.subTest(query=query):
+                    response, route, count = build_mention_response(query)
+                    self.assertEqual(route, "general_chat")
+                    self.assertEqual(count, 1)
+                    self.assertEqual(response, f"general::{query}")
+
+    def test_event_fallback_does_not_trigger_for_generic_chat(self) -> None:
+        with mock.patch("bot.commands.answer_general_chat_query", return_value="A tiny joke."), mock.patch(
+            "bot.commands.maybe_add_charmander_suffix", side_effect=lambda text, allow_suffix=True: text
+        ):
+            response, route, count = build_mention_response("tell me a joke")
+
+        self.assertEqual(route, "general_chat")
+        self.assertEqual(count, 1)
+        self.assertNotIn("event data", response.lower())
+
+    def test_specialized_routes_still_win_over_general_chat(self) -> None:
+        self._seed_dynamax_rankings()
+        self._seed_rankings()
+        self._seed_pvp_rankings()
+        self._seed_shiny_wiki()
+        self._seed_raid_event()
+
+        cases = [
+            ("best fire dynamax attackers", "dynamax_attackers"),
+            ("best fire raid attackers", "raid_attackers"),
+            ("best great league pokemon", "pvp"),
+            ("what are shiny pokemon", "wiki"),
+            ("what raids are active right now", "raids"),
+        ]
+
+        with mock.patch("bot.commands.answer_general_chat_query", return_value="general fallback should not be used"):
+            for query, expected_route in cases:
+                with self.subTest(query=query):
+                    _response, route, count = build_mention_response(query)
+                    self.assertEqual(route, expected_route)
+                    self.assertGreaterEqual(count, 1)
+
+    def test_pokemon_go_general_chat_prefix_is_added_for_uncached_go_topics(self) -> None:
+        with mock.patch("bot.commands.answer_general_chat_query", return_value="General answer only."), mock.patch(
+            "bot.commands.maybe_add_charmander_suffix", side_effect=lambda text, allow_suffix=True: text
+        ):
+            response, route, _count = build_mention_response("what is a pokestop showcase")
+
+        self.assertEqual(route, "general_chat")
+        self.assertIn("I don't have that cached yet.", response)
+        self.assertIn("General answer only.", response)
+
+    def test_maybe_add_charmander_suffix_can_append_suffix(self) -> None:
+        with mock.patch("ai.general_chat_answerer.random.randrange", return_value=0):
+            self.assertEqual(maybe_add_charmander_suffix("Hello there"), "Hello there Char~!")
+
+    def test_maybe_add_charmander_suffix_respects_allow_suffix_false(self) -> None:
+        with mock.patch("ai.general_chat_answerer.random.randrange", return_value=0):
+            self.assertEqual(maybe_add_charmander_suffix("Hello there", allow_suffix=False), "Hello there")
+
+    def test_chat_command_is_registered(self) -> None:
+        tree = FakeCommandTree()
+
+        register_commands(tree, owner_id=123, raid_cache_manager=None, egg_cache_manager=None, dynamax_cache_manager=None, pvp_cache_manager=None, wiki_cache_manager=None)
+
+        self.assertIn("chat", tree.commands)
 
     def test_requested_row_count_parses_top_n_queries(self) -> None:
         cases = {

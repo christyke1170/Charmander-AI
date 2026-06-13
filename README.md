@@ -15,6 +15,7 @@ The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gi
 - Stores Dynamax/Gigantamax attacker ranking rows in a separate `dynamax_attackers` SQLite table, with freshness timestamps in `cache_metadata`
 - Stores LeekDuck egg pool rows in a separate `egg_pools` SQLite table, with freshness timestamps in `cache_metadata`
 - Stores PvPoke Great, Ultra, and Master League ranking rows in a separate `pvp_rankings` SQLite table, with freshness timestamps in `cache_metadata`
+- Stores cached Pokémon GO Wiki/Fandom knowledge chunks in `wiki_pages` and `wiki_chunks`, with freshness timestamps in `cache_metadata`
 - Deduplicates events with `UNIQUE(source, title, start_time)`
 - Discord slash commands:
   - `/events` — upcoming events
@@ -26,6 +27,7 @@ The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gi
   - `/dynamax query:` — ask about cached monthly Dynamax/Gigantamax attacker rankings/data
   - `/eggs query:` — ask about cached current egg pools, distances, Adventure Sync/Route Gift pools, or Pokémon hatch availability
   - `/pvp query:` — ask about cached PvPoke Great/Ultra/Master League rankings
+  - `/wiki query:` — ask about cached Pokémon GO Wiki/Fandom knowledge such as shiny, lucky, shadow, routes, Adventure Sync, and Mega Evolution mechanics
   - `/pokemon query:` — ask about cached Pokémon GO Hub Pokémon knowledge
   - `/update` — owner-only manual update
   - `/updatepokemon` — owner-only manual Pokémon GO Hub DB cache update
@@ -33,6 +35,7 @@ The bot keeps event data, Pokémon knowledge, raid attacker rankings, Dynamax/Gi
   - `/updatedynamax` — owner-only manual Dynamax/Gigantamax attacker cache refresh
   - `/updateeggs` — owner-only manual LeekDuck egg pool cache refresh
   - `/updatepvp` — owner-only manual PvPoke ranking cache refresh
+  - `/updatewiki` — owner-only manual Pokémon GO Wiki/Fandom knowledge cache refresh
   - `/importpokemon` — owner-only local CSV/JSON Pokémon knowledge import fallback
 - Mention-based local Q&A, such as `@Pokemon GO AI Bot what raids are active?`
 - Optional OpenAI-powered RAG answers for `/ask`, `/pokemon`, and @mention conversations after local rows are retrieved
@@ -109,6 +112,12 @@ EGG_AUTO_UPDATE_CHECK_HOURS=24
 PVP_CACHE_MAX_AGE_DAYS=30
 PVP_AUTO_UPDATE=true
 PVP_AUTO_UPDATE_CHECK_HOURS=24
+WIKI_CACHE_MAX_AGE_DAYS=30
+WIKI_AUTO_UPDATE=true
+WIKI_AUTO_UPDATE_CHECK_HOURS=24
+WEB_SEARCH_PROVIDER=none
+GOOGLE_CSE_API_KEY=
+GOOGLE_CSE_ENGINE_ID=
 RAID_ATTACKER_USE_BROWSER_SCRAPER=true
 RAID_ATTACKER_BROWSER_HEADLESS=true
 RAID_ATTACKER_BROWSER_TIMEOUT_SECONDS=45
@@ -123,7 +132,7 @@ DYNAMAX_BROWSER_PROFILE_DIR=data/playwright-dynamax-profile
 
 To get your Discord user ID, enable Developer Mode in Discord, right-click your user, and choose **Copy User ID**.
 
-Raid attacker, Dynamax attacker, egg, and PvP auto-refresh settings control cache age and check frequency. SQLite `cache_metadata.last_updated` stores the actual successful update timestamps.
+Raid attacker, Dynamax attacker, egg, PvP, and wiki auto-refresh settings control cache age and check frequency. SQLite `cache_metadata.last_updated` stores the actual successful update timestamps.
 
 ## Run the manual weekly update
 
@@ -140,6 +149,60 @@ python pokemon_knowledge_update.py
 ```
 
 This initializes the same SQLite database file and updates the separate `pokemon_knowledge` table from Pokémon GO Hub DB pages. The default manual scrape limit is controlled by `POKEMON_DB_SCRAPE_LIMIT=50`.
+
+## Pokémon GO Wiki/Fandom knowledge cache
+
+General Pokémon GO mechanics and feature explanations are cached from the Pokémon GO Wiki/Fandom source:
+
+```text
+https://pokemongo.fandom.com/wiki/Pok%C3%A9mon_GO_Wiki
+```
+
+The wiki cache uses Fandom/MediaWiki API endpoints such as `https://pokemongo.fandom.com/api.php?action=parse...` where possible, with a `requests` + BeautifulSoup HTML fallback if needed. Normal Discord questions **do not scrape Fandom live**. User-facing `/wiki`, `/ask`, and @mention wiki answers search local SQLite `wiki_chunks` first, then use OpenAI only to word an answer grounded in those cached chunks. Responses include source URLs and suppress Discord link previews.
+
+Initial page titles live in:
+
+```text
+data/wiki_pages_seed.txt
+```
+
+Examples:
+
+```text
+/wiki shiny pokemon
+/wiki lucky pokemon
+/wiki shadow pokemon
+/wiki how does mega evolution work
+/wiki adventure sync
+@Pokemon GO AI Bot what are shiny pokemon?
+@Pokemon GO AI Bot can all pokemon be shiny?
+```
+
+Owners can force a refresh with:
+
+```text
+/updatewiki
+```
+
+Run the wiki updater manually with:
+
+```bash
+python wiki_update.py
+python wiki_update.py --page "Shiny Pokémon"
+python wiki_update.py --seed data/wiki_pages_seed.txt
+```
+
+The cache is considered stale after `WIKI_CACHE_MAX_AGE_DAYS` days, defaulting to 30. The bot stores the successful refresh timestamp in SQLite `cache_metadata` under cache name `wiki_knowledge`. On startup, the bot initializes wiki tables, checks freshness, and starts a background refresh when `WIKI_AUTO_UPDATE=true`. A recurring background task checks every `WIKI_AUTO_UPDATE_CHECK_HOURS` hours. If a wiki update fetches zero chunks or fails, existing cached wiki data is kept and metadata is not marked fresh.
+
+Optional web/Google search scaffolding exists but is disabled by default:
+
+```env
+WEB_SEARCH_PROVIDER=none
+GOOGLE_CSE_API_KEY=
+GOOGLE_CSE_ENGINE_ID=
+```
+
+With `WEB_SEARCH_PROVIDER=none`, the bot does not attempt live Google search. Cached wiki knowledge works without Google search.
 
 ## Raid attacker cache auto-update behavior
 
@@ -346,6 +409,18 @@ Run the PvP updater manually with:
 python pvp_update.py
 ```
 
+## Wiki cache routing behavior
+
+Routing keeps existing ranking and event systems ahead of wiki knowledge:
+
+1. Dynamax/Gigantamax attacker ranking questions, such as `best fire dynamax attackers`, use cached Dynamax rankings.
+2. Raid attacker ranking questions use cached raid attacker rankings.
+3. Egg, PvP, current raid/event, and Pokémon-specific knowledge routes keep their existing behavior.
+4. General explanations such as `what is Dynamax?`, `what are shiny Pokémon?`, `what is a lucky trade?`, and `how do routes work?` use cached wiki chunks.
+5. Generic event search/fallback runs after the cached wiki route.
+
+This keeps normal user questions local-first and avoids live scraping during Discord Q&A.
+
 ### Raid attacker browser scraper config
 
 Pokémon GO Hub DB may return Cloudflare challenge pages to plain `requests`. The optional Playwright scraper is enabled by default because it is the practical automated path when the table is visible in a normal browser.
@@ -531,6 +606,9 @@ intents.message_content = True
 - `/pvp query: great` — show top cached Great League PvPoke rankings
 - `/pvp query: ultra top 20` — show up to 20 cached Ultra League rankings
 - `/pvp query: is azumarill good in great league` — search Azumarill in cached Great League rankings
+- `/wiki query: shiny pokemon` — answer from cached Pokémon GO Wiki/Fandom chunks with source URLs
+- `/wiki query: how does mega evolution work` — answer general mechanics questions from cached wiki data
+- `/wiki query: adventure sync` — search cached wiki chunks for Adventure Sync information
 - `/raidattackers` — show top cached overall raid attackers
 - `/raidattackers query: fire` — show top cached Fire-type raid attackers
 - `/raidattackers query: best fire attacker` — ask against cached monthly raid attacker ranking data
@@ -542,6 +620,7 @@ intents.message_content = True
 - `/updateraidattackers` — owner-only manual raid attacker cache refresh
 - `/updateeggs` — owner-only manual egg pool cache refresh
 - `/updatepvp` — owner-only manual PvPoke ranking cache refresh
+- `/updatewiki` — owner-only manual Pokémon GO Wiki/Fandom cache refresh
 - `/importpokemon` — owner-only import from `data/pokemon_knowledge_seed.csv` or `data/pokemon_knowledge_seed.json`
 - `@Pokemon GO AI Bot what raids are active?` — route to raid-related local events
 - `@Pokemon GO AI Bot when is the next community day?` — route to Community Day events
