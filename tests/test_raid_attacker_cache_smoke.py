@@ -59,6 +59,7 @@ from database.dynamax_attackers_db import (
     upsert_dynamax_attackers,
 )
 from database.pokemon_db import init_pokemon_tables
+from database.pokemon_db import upsert_pokemon_knowledge_rows
 from database.pvp_rankings_db import init_pvp_ranking_tables, upsert_pvp_rankings
 from database.raid_attackers_db import (
     get_best_raid_attackers_across_types,
@@ -362,6 +363,20 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
                     "url": "https://pvpoke.com/rankings/all/1500/overall/",
                     "scraped_at": scraped_at,
                 }
+            ]
+        )
+
+    def _seed_pokemon_mentions(self, *names: str) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        upsert_pokemon_knowledge_rows(
+            [
+                {
+                    "source": "test",
+                    "name": name,
+                    "types": "Fire",
+                    "scraped_at": scraped_at,
+                }
+                for name in names
             ]
         )
 
@@ -716,6 +731,106 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(route, "derived_overall")
         self.assertEqual([row["pokemon_name"] for row in rows], ["Steel One", "Dragon Tie Low DPS", "Water One"])
+
+    def test_owned_list_recommendation_triggers_for_raid_query(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        self._seed_pokemon_mentions("Charizard", "Flareon", "Arcanine", "Houndoom")
+        upsert_raid_attacker_rankings(
+            [
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Charizard",
+                    "pokemon_type": "fire",
+                    "rank": 1,
+                    "score": "28.0",
+                    "dps": "32.0",
+                    "fast_move": "Fire Spin",
+                    "charged_move": "Blast Burn",
+                    "scraped_at": scraped_at,
+                },
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Flareon",
+                    "pokemon_type": "fire",
+                    "rank": 2,
+                    "score": "24.0",
+                    "dps": "29.0",
+                    "fast_move": "Fire Spin",
+                    "charged_move": "Overheat",
+                    "scraped_at": scraped_at,
+                },
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Houndoom",
+                    "pokemon_type": "fire",
+                    "rank": 3,
+                    "score": "22.0",
+                    "dps": "27.0",
+                    "fast_move": "Fire Fang",
+                    "charged_move": "Flamethrower",
+                    "scraped_at": scraped_at,
+                },
+            ]
+        )
+
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response, route, _count = build_mention_response("I have Charizard, Flareon, Arcanine, and Houndoom. Who should I use for fire raids?")
+
+        self.assertEqual(route, "raid_attackers")
+        self.assertIn("From your list for Fire raids:", response)
+        self.assertIn("1. Charizard — ranked #1", response)
+        self.assertIn("2. Flareon — ranked #2", response)
+        self.assertIn("3. Houndoom — ranked #3", response)
+        self.assertIn("Arcanine — filler/unknown", response)
+        self.assertIn("Source: cached raid attacker rankings.", response)
+
+    def test_owned_unknown_pokemon_are_mentioned_as_filler_not_found(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        self._seed_pokemon_mentions("Charizard")
+        upsert_raid_attacker_rankings(
+            [
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Charizard",
+                    "pokemon_type": "fire",
+                    "rank": 1,
+                    "score": "28.0",
+                    "dps": "32.0",
+                    "fast_move": "Fire Spin",
+                    "charged_move": "Blast Burn",
+                    "scraped_at": scraped_at,
+                },
+            ]
+        )
+
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response, route, _count = build_mention_response("Out of Charizard, Fakemon, who is best for fire raids?")
+
+        self.assertEqual(route, "raid_attackers")
+        self.assertIn("Charizard", response)
+        self.assertIn("Fakemon — filler/unknown", response)
+
+    def test_casual_fire_type_chat_does_not_trigger_raid_rankings(self) -> None:
+        with mock.patch("bot.commands.answer_general_chat_query", side_effect=lambda query, context=None: f"general::{query}"), mock.patch(
+            "bot.commands.maybe_add_charmander_suffix", side_effect=lambda text, allow_suffix=True: text
+        ):
+            response, route, count = build_mention_response("what if I dont like fire types?")
+
+        self.assertEqual(route, "general_chat")
+        self.assertEqual(count, 1)
+        self.assertEqual(response, "general::what if I dont like fire types?")
+
+    def test_global_top_fire_raid_attackers_still_uses_standard_type_route(self) -> None:
+        self._seed_rankings()
+
+        rows, route = get_raid_attacker_rows_for_query("best fire raid attackers", limit=10)
+
+        self.assertEqual(route, "type:fire")
+        self.assertEqual(rows[0]["pokemon_name"], "Fire One")
 
     def test_derived_overall_sorts_by_numeric_score_dps_tdo(self) -> None:
         self._seed_rankings()

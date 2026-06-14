@@ -111,6 +111,18 @@ RANKING_LANGUAGE_PATTERN = re.compile(
     r"\b(?:best|top|strongest|meta|ranking|rankings|ranked|good|use|using|power\s+up|invest\s+in|types?|mons?|pokemon|pokémon)\b",
     re.IGNORECASE,
 )
+OWNED_LIST_PATTERN = re.compile(
+    r"\b(?:i\s+have|i\s+don't\s+have|i\s+dont\s+have|out\s+of|which\s+of\s+these|from\s+my\s+list|from\s+these)\b",
+    re.IGNORECASE,
+)
+RECOMMENDATION_LANGUAGE_PATTERN = re.compile(
+    r"\b(?:who\s+should\s+i\s+use|what\s+should\s+i\s+use|should\s+i\s+use|who\s+is\s+best|which\s+is\s+best|best\s+for\s+raids?|best|power\s+up|worth\s+using|good\s+for\s+raids?|use\s+for\s+raids?)\b",
+    re.IGNORECASE,
+)
+SINGLE_POKEMON_RECOMMENDATION_PATTERN = re.compile(
+    r"\b(?:worth\s+using|good\s+for\s+raids?|use\s+for\s+raids?|power\s+up|should\s+i\s+use)\b",
+    re.IGNORECASE,
+)
 RAID_ATTACKER_INTENT_PATTERN = re.compile(
     r"\b(?:raid|raids|raiding|pve|attackers?|atackers?|attakers?|tchackers?|attack|counter|counters|best|top|rank|ranking|strongest|dps|tdo)\b",
     re.IGNORECASE,
@@ -382,6 +394,8 @@ def _is_raid_attacker_query(query: str) -> bool:
     if has_type and has_explicit_type_ranking_request:
         return True
     if has_type and has_explicit_raid_attacker_intent and (has_attacker_word or has_raid_context or "counter" in normalized or "use in raids" in normalized):
+        return True
+    if _is_owned_raid_recommendation_query(normalized):
         return True
     return False
 
@@ -692,6 +706,164 @@ def _detect_raid_attacker_type(query: str | None) -> str | None:
     return _detect_pokemon_type_from_query(query or "") or normalize_type_name(query or "")
 
 
+def _normalize_candidate_name(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _clean_candidate_fragment(value: str) -> str:
+    cleaned = value.strip(" \t\n\r.,!?;:-")
+    cleaned = re.sub(
+        r"\b(?:who\s+should\s+i\s+use|what\s+should\s+i\s+use|who\s+is\s+best|which\s+is\s+best|should\s+i\s+power\s+up|should\s+i\s+use|best\s+for\s+raids?|for\s+\w+\s+raids?|for\s+raids?|raid\s+attackers?|worth\s+using)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\n\r.,!?;:-")
+    return cleaned
+
+
+def _extract_owned_pokemon_candidates(query: str | None, limit: int = 8) -> list[str]:
+    """Extract likely user-owned Pokémon candidates from a natural-language query."""
+
+    text = (query or "").replace("’", "'")
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(value: str) -> None:
+        cleaned = _clean_candidate_fragment(value)
+        if not cleaned:
+            return
+        normalized = _normalize_candidate_name(cleaned)
+        if not normalized or normalized in seen:
+            return
+        if normalized in {"fire", "water", "grass", "electric", "raids", "raid", "pokemon", "pokémon", "these", "list"}:
+            return
+        seen.add(normalized)
+        candidates.append(cleaned)
+
+    clause_patterns = (
+        r"\bi\s+don't\s+have\s+(.+?)(?:(?:\.|\?|!|$)|\bi\s+have\b)",
+        r"\bi\s+dont\s+have\s+(.+?)(?:(?:\.|\?|!|$)|\bi\s+have\b)",
+        r"\bi\s+have\s+(.+?)(?:[.?!]|$)",
+        r"\bout\s+of\s+(.+?)(?:(?:,?\s+(?:who|which|what)\b)|[.?!]|$)",
+        r"\bwhich\s+of\s+these(?:\s+should\s+i\s+(?:use|power\s+up))?\s*:\s*(.+?)(?:[.?!]|$)",
+        r"\bfrom\s+(?:my\s+list|these)\s*:\s*(.+?)(?:[.?!]|$)",
+    )
+    for pattern in clause_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            clause = match.group(1)
+            for piece in re.split(r",|\band\b|\bor\b|/", clause, flags=re.IGNORECASE):
+                add_candidate(piece)
+
+    try:
+        mentions = find_pokemon_mentions(text, limit=limit)
+    except Exception:
+        logger.debug("Could not extract Pokémon mentions for owned recommendation parsing", exc_info=True)
+        mentions = []
+    for mention in mentions:
+        if isinstance(mention, dict):
+            add_candidate(str(mention.get("name") or mention.get("pokemon_name") or ""))
+        elif isinstance(mention, str):
+            add_candidate(mention)
+
+    return candidates[:limit]
+
+
+def _is_owned_raid_recommendation_query(query: str | None) -> bool:
+    normalized = (query or "").lower().strip().replace("’", "'")
+    if not normalized or _is_casual_type_chat(normalized):
+        return False
+
+    candidates = _extract_owned_pokemon_candidates(normalized)
+    if not candidates:
+        return False
+
+    detected_type = _detect_raid_attacker_type(normalized)
+    has_raid_context = bool(RAID_CONTEXT_PATTERN.search(normalized))
+    has_owned_list = bool(OWNED_LIST_PATTERN.search(normalized))
+    has_recommendation_language = bool(RECOMMENDATION_LANGUAGE_PATTERN.search(normalized))
+    has_mega_context = "mega" in normalized
+
+    if len(candidates) >= 2 and has_owned_list and (has_recommendation_language or has_raid_context or detected_type or has_mega_context):
+        return True
+    if len(candidates) >= 2 and has_recommendation_language and (has_raid_context or detected_type or has_mega_context):
+        return True
+    if len(candidates) == 1 and SINGLE_POKEMON_RECOMMENDATION_PATTERN.search(normalized) and (has_raid_context or detected_type):
+        return True
+    return False
+
+
+def _metric_as_float(value: Any) -> float:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return float("-inf")
+
+
+def _owned_recommendation_heading(route: str, query: str | None) -> str:
+    if route.startswith("owned:type:"):
+        route_type = route.split(":", 2)[2].title()
+        return f"From your list for {route_type} raids:"
+    detected_type = _detect_raid_attacker_type(query or "")
+    if detected_type:
+        return f"From your list for {detected_type.title()} raids:"
+    return "From your list for raids:"
+
+
+def _build_owned_raid_attacker_response(query: str | None, rows: list[dict[str, Any]], route: str, max_chars: int) -> str:
+    candidates = _extract_owned_pokemon_candidates(query)
+    if not candidates:
+        return _format_compact_raid_attacker_rows(rows, route.replace("owned:", "", 1), query, max_rows=_requested_row_count(query), max_chars=max_chars)
+
+    row_by_name: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name_key = _normalize_candidate_name(row.get("pokemon_name"))
+        if name_key and name_key not in row_by_name:
+            row_by_name[name_key] = row
+
+    matched: list[tuple[str, dict[str, Any]]] = []
+    missing: list[str] = []
+    for candidate in candidates:
+        matched_row = row_by_name.get(_normalize_candidate_name(candidate))
+        if matched_row:
+            matched.append((candidate, matched_row))
+        else:
+            missing.append(candidate)
+
+    if route.startswith("owned:type:"):
+        matched.sort(key=lambda item: ((item[1].get("rank") is None), item[1].get("rank") or 9999, -_metric_as_float(item[1].get("score")), -_metric_as_float(item[1].get("dps")), item[0].lower()))
+    else:
+        matched.sort(key=lambda item: (-_metric_as_float(item[1].get("score")), -_metric_as_float(item[1].get("dps")), (item[1].get("rank") is None), item[1].get("rank") or 9999, item[0].lower()))
+
+    lines = [_owned_recommendation_heading(route, query)]
+    index = 1
+    for candidate, row in matched:
+        rank = row.get("rank")
+        parts: list[str] = []
+        if rank is not None and route.startswith("owned:type:"):
+            route_type = route.split(":", 2)[2].title()
+            parts.append(f"ranked #{rank} in cached {route_type} raid attackers")
+        score = row.get("score")
+        dps = row.get("dps")
+        if score and dps:
+            parts.append(f"Score {score}, DPS {dps}")
+        elif score:
+            parts.append(f"Score {score}")
+        elif dps:
+            parts.append(f"DPS {dps}")
+        detail = "; ".join(parts) if parts else "found in cached raid attacker rankings"
+        lines.append(f"{index}. {candidate} — {detail}.")
+        index += 1
+
+    for candidate in missing:
+        lines.append(f"{index}. {candidate} — filler/unknown; I do not see it in the top cached raid attacker rankings.")
+        index += 1
+
+    lines.append("Source: cached raid attacker rankings.")
+    response = "\n".join(lines)
+    return response[:max_chars]
+
+
 def _detect_dynamax_attacker_type(query: str | None) -> str | None:
     return _detect_pokemon_type_from_query(query or "") or normalize_type_name(query or "")
 
@@ -761,6 +933,11 @@ def get_raid_attacker_rows_for_query(query: str | None, limit: int = 10) -> tupl
     """Return ranking rows for a slash/mention query and the route used."""
 
     normalized = (query or "").strip().lower()
+    if _is_owned_raid_recommendation_query(normalized):
+        detected_type = _detect_raid_attacker_type(normalized)
+        if detected_type:
+            return get_top_raid_attackers_by_type(detected_type, limit=max(limit, 100)), f"owned:type:{detected_type}"
+        return get_best_raid_attackers_across_types(limit=max(limit, 100)), "owned:derived_overall"
     detected_type = _detect_raid_attacker_type(normalized)
     if detected_type:
         return get_top_raid_attackers_by_type(detected_type, limit=limit), f"type:{detected_type}"
@@ -835,6 +1012,8 @@ def build_raid_attacker_response(
 
     notice = _raid_cache_notice(is_update_running)
     max_body_length = MAX_DISCORD_MESSAGE_LENGTH - len(notice)
+    if route.startswith("owned:"):
+        return _build_owned_raid_attacker_response(query, rows, route, max_body_length) + notice
     compact_answer = _format_compact_raid_attacker_rows(
         rows,
         route,

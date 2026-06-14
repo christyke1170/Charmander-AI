@@ -1,0 +1,446 @@
+Menu
+Stats
+Counters
+CP & IV
+PvP
+Moves
+Mewtwo
+Dragonite
+Mew
+Mewtwo
+↓
+Table of Contents
+
+Mewtwo is a Legendary Psychic-type Pokémon in Pokémon GO. As a Psychic-type Pokémon, Mewtwo is weak to Bug, Dark, and Ghost-type moves.
+
+Mewtwo's maximum Combat Power stat is 4724 CP, and its recommended Pokémon GO moveset is Psycho Cut / Psystrike. Mewtwo encounters are boosted during Windy weather. Shiny Mewtwo is available! ✨
+
+Mewtwo Stats and Max CP
+300
+ATK
+182
+DEF
+214
+HP
+Lvl 50 Max CP
+4724 CP
+Lvl 40
+4178 CP
+Lvl 25 Weather Boost
+2984 CP
+Lvl 20 Raids/Eggs
+2387 CP
+Lvl 15 Research
+1791 CP
+Mewtwo's Tier Ranking
+Raid Attacker
+A Tier
+#68
+Psychic-type
+S Tier
+#5
+Ultra League
+C Tier
+#534
+Master League
+A+ Tier
+#45
+Mewtwo Type Chart
+Mewtwo takes increased damage from:
+Bug
+160.0%
+Dark
+160.0%
+Ghost
+160.0%
+Mewtwo takes reduced damage from:
+Fighting
+62.5%
+Psychic
+62.5%
+Moves Analysis
+Psycho Cut + Psystrike
+S
+Psycho Cut
+Psystrike *
+Mewtwo's best Psychic-type moveset is Psycho Cut / Psystrike, with 18.39 DPS and 386.6 TDO. These moves are boosted by Windy weather. Mewtwo ranks #5 (S Tier) as a Psychic attacker with that moveset.
+Weather
+Extreme
+↓
+Opponent
+#
+	
+Fast Attack
+	
+Charged Attack
+	
+DPS
+	
+TDO
+	
+Score 🔽
+
+1.	
+Psycho Cut
+	
+Psystrike *
+	18.39	386.6	16.44
+2.	
+Confusion
+	
+Psystrike *
+	18.20	382.7	16.28
+3.	
+Confusion
+	
+Psychic
+	17.04	358.4	15.24
+4.	
+Psycho Cut
+	
+Psychic
+	16.94	356.2	15.16
+5.	
+Confusion
+	
+Shadow Ball *
+	15.76	331.4	14.09
+6.	
+Psycho Cut
+	
+Shadow Ball *
+	15.34	322.6	13.73
+7.	
+Confusion
+	
+Thunderbolt
+	14.89	313.1	13.31
+8.	
+Confusion
+	
+Focus Blast
+	14.73	309.7	13.18
+Show 8
+Show 10
+Show 12
+Show 16
+Show 20
+Show 30
+Show 50
+Show 100
+Show 200
+1 of 2
+Fast Attacks
+Psycho Cut
+4
+7
+0.5s
+Confusion
+19
+14
+1.5s
+Charged Attacks
+Thunderbolt
+80
+50
+2.5s
+Focus Blast
+140
+100
+3.5s
+Flamethrower
+65
+50
+2.0s
+Shadow Ball *
+100
+50
+3.0s
+Ice Beam
+95
+50
+3.5s
+Hyper Beam *
+150
+100
+4.0s
+Psychic
+95
+50
+3.0s
+Psystrike *
+95
+50
+2.5s
+More information
+Mewtwo in the meta
+PvE Analysis
+Recommended moves
+Psychic Attacker:
+Psycho Cut
+Psystrike *
+
+The iconic Mewtwo is one of the most sought-after and powerful Legendaries in Pokémon GO, and rightfully so, boasting exceptionally strong stats and a versatile moveset.
+
+Even though there are several Psychic-type Mega Evolutions and a vast number of Shadows, Mewtwo’s might is only beaten by its own Megas and Shadow, and the Mega Evolution and Shadow form of Alakazam. With Shadow Alakazam being extremely fragile, you would almost always prefer Mewtwo over it.
+
+While it's obvious that Mewtwo is a phenomenal Psychic-type attacker, it learns a wide variety of non-STAB Charged Attacks in Pokémon GO that make this Legendary a viable attacker in those types, all thanks to its high ATK.
+
+Psycho Cut and Psystrike (always worth an Elite Charged TM) is the combo you need, but it's also a great idea to unlock a second Charged Attack to make your Mewtwo more flexible in Raids.
+
+Notably, Shadow Ball is a powerful tool to hit Ghost Pokémon (which it is also weak to), Ice Beam is superb against Dragon types, especially those double-weak to Ice, and Thunderbolt brings down those high Flyers as well as Water types.
+
+Mewtwo is one of the best investments in Pokémon GO, and with two outstanding Mega Evolutions (particularly Mega Mewtwo Y), the value obtained from this cult figure has only risen!
+
+Legendaries always shake up the meta, but the consistency that Mewtwo and its Mega Evolutions offer is unchallenged.
+
+Also, if you have no idea on which Pokémon you should use your Bottle Cap on, then Mewtwo is one of the safest and most rewarding options.
+
+Show more
+PvP Analysis
+Recommended moves
+Ultra League:
+Psycho Cut
+Psystrike
+Shadow Ball
+Master League:
+Psycho Cut
+Psystrike
+Shadow Ball
+🔵 Great League
+
+Not applicable
+
+🟡 Ultra League
+
+Despite being a little fragile in the Ultra League, Mewtwo's superb moveset and coverage make it a legitimate threat in this format. What really works in its favor is that many of the Ultra League’s top threats are weak to Psychic and Ghost, including Tentacruel, Virizion, Shadow Nidoqueen, Annihilape, Primeape, and Skeledirge. Additionally, it's also able to take out Blastoise, Cobalion, Cresselia, Shadow Ampharos, and even Armored Mewtwo due to the pressure applied by its fast and hard-hitting moveset.
+
+On the flip side, Bug, Dark, and Ghost type opponents are aplenty and meta-relevant. So, Mewtwo falls behind other Psychic types, including the bulkier Armored Mewtwo, when it comes to excelling in these battles.
+
+It is a bit deadlier in the (0-0) shield scenario, taking out even Giratina Altered and Shadow Dusknoir in the face-off, but overall, its low bulk makes it less strong than you would expect Mewtwo to be.
+
+🟣 Master League
+
+With nothing to hold it back, Mewtwo is at its best in the Master League. But this “best” era has set a while back, with stronger Legendaries taking over this format. Be it the Origin Forme Dragons, the Necrozma Fusions, Black and White Kyurem, or the Crowned Legendaries from Galar, power creep has been brutal on Mewtwo.
+
+Many of these Legendaries possess stronger moves than Psystrike and have better offensive coverage, making Mewtwo less dominant than it once was. It's not that Mewtwo is bad by any means, it can take down the mighty Eternatus easily, and also beat some core threats like Landorus Therian, Crowned Shield Zamazenta, Zacian Hero, and Dawn Wings Necrozma.
+
+So while you can still have a go at it to create shield pressure on the opponent and even get a KO, it is outperformed by several Pokémon in today's meta.
+
+Show more
+Pokédex information
+Pokédex Number	#150
+Height	2 m
+Weight	122 kg
+Region	Generation 1
+Can be traded	Allowed
+Buddy distance	20 km
+Released	Yes
+Shiny released	Yes
+Pokémon Home transfer	Allowed
+Base Catch Rate	2%
+Base Flee Rate	0%
+Catch rewards	
+3
+100
+
+Additional Move Cost	
+100
+100000
+Evolution Chart
+Pokémon	Requires	Evolution
+
+Mewtwo
+	
+7500 / 150 Mega Energy
+	
+Mega Mewtwo X
+
+
+Mewtwo
+	
+7500 / 150 Mega Energy
+	
+Mega Mewtwo Y
+Mewtwo can Mega evolve into Mega Mewtwo X. Evolving Mega Mewtwo X costs 7500 Mega energy the first time, and 150 energy every other time.
+Mewtwo can Mega evolve into Mega Mewtwo Y. Evolving Mega Mewtwo Y costs 7500 Mega energy the first time, and 150 energy every other time.
+More information
+▾
+Mewtwo family
+▾
+Size information
+▾
+Encounter data
+Mewtwo CP Chart
+
+Mewtwo's has 4724 max CP (at Level 50). A Mewtwo obtained from Raids can be encountered from 2294 CP to 2387 CP, or if weather boosted, in the 2868 CP to 2984 CP range. In Field and Special Research, Mewtwo can be found in the 1720 CP to 1791 CP range.
+
+Max CP
+	4724 CP
+Level 50, 15/15/15 IVs
+
+Research
+	1720 CP - 1791 CP
+Level 15, 10/10/10 minimum IVs
+
+Eggs
+	2294 CP - 2387 CP
+Level 20, 10/10/10 minimum IVs
+
+Raids
+	2294 CP - 2387 CP
+Level 20, 10/10/10 minimum IVs
+2868 CP - 2984 CP
+Weather boosted, Level 25, 10/10/10 minimum IVs
+More information
+Max Combat Power per Level chart
+
+Mewtwo Max CP per level chart. This table shows maximum Combat Power values from Level 1 to Level 50.
+
+LVL	Max CP	LVL	Max CP	LVL	Max CP
+1	59 CP	2	185 CP	3	311 CP
+4	437 CP	5	563 CP	6	689 CP
+7	815 CP	8	942 CP	9	1068 CP
+10	1194 CP	11	1313 CP	12	1432 CP
+13	1552 CP	14	1671 CP	15	1791 CP
+16	1910 CP	17	2029 CP	18	2149 CP
+19	2268 CP	20	2387 CP	21	2507 CP
+22	2626 CP	23	2746 CP	24	2865 CP
+25	2984 CP	26	3104 CP	27	3223 CP
+28	3343 CP	29	3462 CP	30	3582 CP
+31	3641 CP	32	3701 CP	33	3761 CP
+34	3820 CP	35	3880 CP	36	3940 CP
+37	3999 CP	38	4059 CP	39	4119 CP
+40	4178 CP	41	4231 CP	42	4285 CP
+43	4338 CP	44	4392 CP	45	4447 CP
+46	4502 CP	47	4557 CP	48	4612 CP
+49	4668 CP	50	4724 CP
+Mega Pokémon that boost Mewtwo
+
+A list of Mega Pokémon that boost Mewtwo's Psychic-type moves, Candy, and Candy XL from catching Mewtwo.
+
+Psychic
+Mega Alakazam
+Mega Slowbro
+Mega Gardevoir
+Mega Medicham
+Mega Metagross
+Mega Latias
+Mega Latios
+Mega Rayquaza
+Mega Gallade
+Mega Malamar
+More information
+Catch Rates and Power Up Costs
+
+The base catch rate for Mewtwo in Pokémon GO is 1.67%, calculated for catching a Level 20 with no berries. Curved Great throw has a 4.21% chance to catch, and adding a Razz Berry raises that to 6.25%.
+
+Configure
+		Normal	Nice	Great	Excellent
+
+No Berry
+	-	1.67%	1.92%	2.50%	3.07%
+Curve	2.83%	3.25%	4.21%	5.17%
+
+Razz Berry
+	-	2.50%	2.87%	3.73%	4.58%
+Curve	4.21%	4.83%	6.25%	7.65%
+
+Silver Pinap Berry
+	-	2.99%	3.43%	4.46%	5.47%
+Curve	5.03%	5.77%	7.46%	9.11%
+
+Golden Razz Berry
+	-	4.13%	4.74%	6.13%	7.51%
+Curve	6.92%	7.92%	10.20%	12.43%
+More information
+
+
+Mewtwo Pokémon GO Power Up Costs
+	Stardust	Candy	Candy XL
+LVL 50	520,000 	304 	296 
+LVL 40	280,000 	304 	10 
+LVL 35	190,000 	196 	-
+LVL 30	125,000 	126 	-
+LVL 25	80,000 	87 	-
+LVL 20	47,500 	58 	-
+LVL 15	25,500 	38 	-
+LVL 10	11,000 	19 	-
+LVL 5	3,000 	9 	-
+
+Mewtwo Power Up costs in Pokémon GO. The table shows the total Stardust, Candy, and Candy XL required to power up Mewtwo from Level 1 to Level 15, 20, 25, 30, 35, 40, and 50. It will cost you 520,000 Stardust, 304 Candy, and 296 Candy XL to fully power up Mewtwo in Pokémon GO.
+
+Complete Mewtwo Power Up Costs Table
+Sprites
+Regular and Shiny Mewtwo
+Regular Mewtwo
+Copy shortcode
+Shiny Mewtwo
+Copy shortcode
+Mewtwo high resolution sprites
+
+A list of high resolution Pokémon HOME sprites related to Mewtwo. Sprite description is a best guess on what the sprite is related to, use your own judgment. Click to download full 512x512 resolution.
+
+#150
+#150
+Wallpaper
+Mewtwo Pokédex entries
+Versions	Pokédex entry
+Red, Blue	It was created by a scientist after years of horrificgene splicing and DNA engineering experiments.
+Yellow	Its DNA is almost the same as MEW's. However, its sizeand disposition are vastly dif­ ferent.
+Gold	Because its battle abilities were raised to theultimate level, it thinks only of de­ feating its foes.
+Silver	It usually remains motionless to con­ serve energy, sothat it may un­ leash its full power in battle.
+Crystal	Said to rest qui­ etly in an undiscovered cave,this POKéMON was created solely for battling.
+Ruby, Sapphire	MEWTWO is a POKéMON that was created by genetic manipulation. However, even though the scientificpower of humans created this POKéMON’s body, they failed to endow MEWTWO with a compassionate heart.
+Emerald	A POKéMON that was created by genetic manipulation. However, even though the scientific power of humans made its body, they failed to give it a warm heart.
+FireRed	A POKéMON whose genetic code was repeatedly recombined for research. It turned vicious as a result.
+LeafGreen	It was created by a scientist after years of horrific gene-splicing and DNA- engineering experiments.
+Diamond, Pearl, Platinum	A Pokémon created by recombining MEW’s genes. It’s said to have the most savage heart among Pokémon.
+HeartGold	Because its battle abilities were raised to the ultimate level, it thinks only of defeating its foes.
+SoulSilver	It usually remains motionless to conserve energy, so that it may unleash its full power in battle.
+Black, White, Black 2, White 2	A Pokémon created by recombining Mew’s genes. It’s said to have the most savage heart among Pokémon.
+X	It was created by a scientist after years of horrific gene-splicing and DNA-engineering experiments.
+Y	A Pokémon created by recombining Mew’s genes. It’s said to have the most savage heart among Pokémon.
+Omega Ruby	Mewtwo is a Pokémon that was created by genetic manipulation. However, even though the scientific power of humans created this Pokémon’s body, they failed to endow Mewtwo with a compassionate heart.
+Alpha Sapphire	Mewtwo is a Pokémon that was created by genetic manipulation. However, even though the scientific power of humans created this Pokémon’s body, they failed to endow Mewtwo with a compassionate heart.
+Let's Go, Pikachu!, Let's Go, Eevee!	Its DNA is almost the same as Mew’s. However, its size and disposition are vastly different.
+List of Mewtwo costumes
+
+A list of Mewtwo costumes available in Pokémon GO.
+
+ONE_YEAR_ANNIVERSARY
+Copy shortcode
+ONE_YEAR_ANNIVERSARY ✨
+Copy shortcode
+Frequently Asked Questions
+What are Mewtwo’s strengths and weaknesses?
+
+As a Psychic-type Pokémon, Mewtwo is weak to Bug, Dark, and Ghost-type moves.
+
+What are the best moves for Mewtwo in Pokémon GO?
+
+The best moves for Mewtwo in Pokémon GO are Psycho Cut and Psystrike. This moveset has a DPS (Damage Per Second) of 18.386 and a TDO (Total Damage Output) of 386.602.
+
+How does Mewtwo perform in Raids?
+
+Mewtwo is a solid choice for many Raid battles. Ranks #68 as a Raid attacker.
+
+How does Mewtwo rank as a Psychic-type attacker?
+
+Mewtwo is an S-Tier Psychic-type attacker, ranking at number #5 and providing exceptional value due to its strong stats and effective moveset.
+
+What Mega Pokémon boost Mewtwo?
+
+The following Mega Pokémon boost Mewtwo: Mega Alakazam, Mega Slowbro, Mega Gardevoir, Mega Medicham, Mega Metagross, Mega Latias, Mega Latios, Mega Rayquaza, Mega Gallade, and Mega Malamar.
+
+What is Mewtwo’s maximum CP at Level 40 and Level 50?
+
+Mewtwo’s maximum CP at Level 40 is 4178 CP and 4724 CP at Level 50.
+
+Can Mewtwo be shiny in Pokémon GO?
+
+Mewtwo can be Shiny in Pokémon GO ✨.
+
+Can Mewtwo Dynamax in Pokémon GO?
+
+Mewtwo cannot Dynamax in Pokémon GO.
