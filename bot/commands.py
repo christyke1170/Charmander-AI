@@ -123,6 +123,21 @@ SINGLE_POKEMON_RECOMMENDATION_PATTERN = re.compile(
     r"\b(?:worth\s+using|good\s+for\s+raids?|use\s+for\s+raids?|power\s+up|should\s+i\s+use)\b",
     re.IGNORECASE,
 )
+SPECIFIC_RAID_POKEMON_PATTERN = re.compile(
+    r"\b(?:"
+    r"how\s+strong|how\s+good|is\s+.+\s+good|worth\s+investing\s+in|worth\s+it|"
+    r"should\s+i\s+invest\s+in|do\s+you\s+recommend(?:\s+me)?\s+invest(?:ing)?\s+in|"
+    r"recommend(?:\s+me)?\s+invest(?:ing)?\s+in|good\s+as\s+a?n?\s+\w+\s+attacker|"
+    r"worth\s+using\s+for\s+\w+\s+raids?|good\s+for\s+\w+\s+raids?|should\s+i\s+power\s+up|"
+    r"power\s+it\s+up|power\s+up"
+    r")\b",
+    re.IGNORECASE,
+)
+SPECIFIC_RAID_FOLLOWUP_PATTERN = re.compile(
+    r"\b(?:do\s+you\s+recommend(?:\s+me)?\s+invest(?:ing)?\s+in\s+it|should\s+i\s+power\s+it\s+up|is\s+it\s+worth\s+it|"
+    r"should\s+i\s+invest\s+in\s+it|do\s+you\s+recommend\s+it|worth\s+it)\b",
+    re.IGNORECASE,
+)
 RAID_ATTACKER_INTENT_PATTERN = re.compile(
     r"\b(?:raid|raids|raiding|pve|attackers?|atackers?|attakers?|tchackers?|attack|counter|counters|best|top|rank|ranking|strongest|dps|tdo)\b",
     re.IGNORECASE,
@@ -376,6 +391,8 @@ def _is_raid_attacker_query(query: str) -> bool:
         return False
     if _is_current_raid_event_query(normalized):
         return False
+    if _is_specific_raid_pokemon_query(normalized):
+        return True
 
     detected_type = _detect_pokemon_type_from_query(normalized)
     has_type = detected_type is not None
@@ -398,6 +415,200 @@ def _is_raid_attacker_query(query: str) -> bool:
     if _is_owned_raid_recommendation_query(normalized):
         return True
     return False
+
+
+def _detect_pokemon_types_from_query(query: str | None) -> list[str]:
+    """Return all canonical Pokémon types mentioned in the query, preserving order."""
+
+    normalized = (query or "").lower()
+    matches: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for pokemon_type in POKEMON_TYPES:
+        match = re.search(rf"\b{re.escape(pokemon_type)}\b", normalized)
+        if match and pokemon_type not in seen:
+            matches.append((match.start(), pokemon_type))
+            seen.add(pokemon_type)
+    matches.sort(key=lambda item: item[0])
+    return [pokemon_type for _, pokemon_type in matches]
+
+
+def _extract_specific_raid_subject(query: str | None) -> str | None:
+    """Extract the likely Pokémon/form subject for specific raid evaluation questions."""
+
+    text = (query or "").strip()
+    if not text:
+        return None
+    try:
+        mentions = find_pokemon_mentions(text, limit=5)
+    except Exception:
+        logger.debug("Could not extract Pokémon mentions for raid evaluation parsing", exc_info=True)
+        mentions = []
+
+    candidates: list[str] = []
+    for mention in mentions:
+        if isinstance(mention, dict):
+            name = mention.get("name") or mention.get("pokemon_name")
+            if name:
+                candidates.append(str(name).strip())
+        elif isinstance(mention, str):
+            candidates.append(mention.strip())
+    if not candidates:
+        return None
+    return max((candidate for candidate in candidates if candidate), key=len, default=None)
+
+
+def _is_specific_raid_pokemon_query(query: str | None) -> bool:
+    """Return whether a raid query is asking to evaluate one specific Pokémon."""
+
+    normalized = (query or "").lower().strip().replace("’", "'")
+    if not normalized or _is_casual_type_chat(normalized) or _is_current_raid_event_query(normalized):
+        return False
+    if not _extract_specific_raid_subject(query):
+        return False
+    if SPECIFIC_RAID_POKEMON_PATTERN.search(normalized):
+        return True
+    if re.search(r"\b(?:how\s+strong|how\s+good|good\s+for\s+raids?|worth\s+using)\b", normalized) and (
+        RAID_CONTEXT_PATTERN.search(normalized) or _detect_pokemon_types_from_query(normalized)
+    ):
+        return True
+    return False
+
+
+def _normalize_subject_name(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _row_subject_keys(row: dict[str, Any]) -> set[str]:
+    name = str(row.get("pokemon_name") or "").strip()
+    form = str(row.get("form") or "").strip()
+    keys = {_normalize_subject_name(name)} if name else set()
+    if form:
+        full_name = name if form.lower() in name.lower() else f"{form} {name}".strip()
+        keys.add(_normalize_subject_name(full_name))
+    return {key for key in keys if key}
+
+
+def _filter_rows_for_specific_subject(rows: list[dict[str, Any]], subject: str | None) -> list[dict[str, Any]]:
+    subject_key = _normalize_subject_name(subject)
+    if not subject_key:
+        return []
+    matched: list[dict[str, Any]] = []
+    for row in rows:
+        keys = _row_subject_keys(row)
+        if any(subject_key == key or subject_key in key or key in subject_key for key in keys):
+            matched.append(row)
+    return matched
+
+
+def _best_specific_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return sorted(
+        rows,
+        key=lambda row: (
+            row.get("rank") is None,
+            row.get("rank") or 9999,
+            -_metric_as_float(row.get("score")),
+            -_metric_as_float(row.get("dps")),
+            str(row.get("pokemon_type") or ""),
+        ),
+    )[0]
+
+
+def _format_specific_raid_metric_line(pokemon_type: str, row: dict[str, Any]) -> str:
+    moveset = (
+        f"{str(row.get('fast_move') or 'fast move unknown').strip()} / "
+        f"{str(row.get('charged_move') or 'charged move unknown').strip()}"
+    )
+    pieces = [f"{pokemon_type.title()}: ranked #{row.get('rank')} among cached {pokemon_type.title()}-type raid attackers with {moveset}"]
+    metrics: list[str] = []
+    if row.get("score"):
+        metrics.append(f"Score {row.get('score')}")
+    if row.get("dps"):
+        metrics.append(f"DPS {row.get('dps')}")
+    if metrics:
+        pieces.append("— " + ", ".join(metrics) + ".")
+    else:
+        pieces.append(".")
+    return " ".join(pieces)
+
+
+def _format_specific_raid_response(query: str | None, rows: list[dict[str, Any]], max_chars: int) -> str:
+    subject = _extract_specific_raid_subject(query) or "That Pokémon"
+    subject_rows = _filter_rows_for_specific_subject(rows, subject)
+    if not subject_rows:
+        return f"I couldn’t find cached raid attacker rankings for {subject}.\nSource: cached raid attacker rankings."[:max_chars]
+
+    requested_types = _detect_pokemon_types_from_query(query)
+    is_investment = bool(re.search(r"\b(?:invest|investment|worth\s+it|power\s+up|recommend)\b", query or "", re.IGNORECASE))
+    best_row = _best_specific_row(subject_rows)
+    best_type = str(best_row.get("pokemon_type") or "raid").title() if best_row else "raid"
+
+    if is_investment:
+        lines = [f"Yes — based on the cached {best_type} rankings, {subject} looks like a strong investment for {best_type} raids."]
+    else:
+        lines = [f"{subject} looks strong from the cached raid rankings."]
+
+    if requested_types:
+        for pokemon_type in requested_types:
+            type_rows = [row for row in subject_rows if str(row.get("pokemon_type") or "").lower() == pokemon_type]
+            best_type_row = _best_specific_row(type_rows)
+            if best_type_row:
+                lines.append("")
+                lines.append(_format_specific_raid_metric_line(pokemon_type, best_type_row))
+            else:
+                lines.append("")
+                lines.append(
+                    f"{pokemon_type.title()}: I do not see {subject} in the cached {pokemon_type.title()}-type top rankings."
+                )
+    elif best_row:
+        lines.append("")
+        lines.append(_format_specific_raid_metric_line(str(best_row.get("pokemon_type") or "raid"), best_row))
+
+    if best_row:
+        verdict_type = str(best_row.get("pokemon_type") or "raid").title()
+        move_name = str(best_row.get("charged_move") or "its best charged move").strip()
+        if is_investment:
+            lines.append("")
+            lines.append(f"I’d invest if you get a good one, especially if you can run {move_name}.")
+        else:
+            lines.append("")
+            lines.append(f"Verdict: as a {verdict_type} attacker, it looks like a high-priority raid investment from this cache.")
+
+    lines.append("Source: cached raid attacker rankings.")
+    return "\n".join(lines)[:max_chars]
+
+
+def _infer_specific_raid_subject_from_bot_message(content: str | None) -> str | None:
+    """Recover the previously discussed Pokémon subject from a specific-evaluation bot reply."""
+
+    text = (content or "").strip()
+    if not text:
+        return None
+    patterns = (
+        r"^([A-Z][A-Za-z0-9' .-]+?) looks",
+        r"cached [A-Za-z]+ rankings, ([A-Z][A-Za-z0-9' .-]+?) looks",
+        r"I do not see ([A-Z][A-Za-z0-9' .-]+?) in the cached",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.MULTILINE)
+        if match:
+            return match.group(1).strip(" .")
+    return None
+
+
+def _is_specific_raid_followup_without_subject(query: str | None) -> bool:
+    normalized = (query or "").lower().strip().replace("’", "'")
+    if not normalized or _extract_specific_raid_subject(query):
+        return False
+    return bool(SPECIFIC_RAID_FOLLOWUP_PATTERN.search(normalized))
+
+
+def _inject_subject_into_followup_query(query: str, subject: str) -> str:
+    normalized = query.strip()
+    if re.search(r"\bit\b", normalized, flags=re.IGNORECASE):
+        return re.sub(r"\bit\b", subject, normalized, flags=re.IGNORECASE)
+    return f"{normalized} {subject}".strip()
 
 
 def _is_dynamax_query(query: str) -> bool:
@@ -933,6 +1144,10 @@ def get_raid_attacker_rows_for_query(query: str | None, limit: int = 10) -> tupl
     """Return ranking rows for a slash/mention query and the route used."""
 
     normalized = (query or "").strip().lower()
+    if _is_specific_raid_pokemon_query(query):
+        subject = _extract_specific_raid_subject(query)
+        if subject:
+            return _filter_rows_for_specific_subject(search_raid_attackers(subject, limit=max(limit, 100)), subject), "specific_eval"
     if _is_owned_raid_recommendation_query(normalized):
         detected_type = _detect_raid_attacker_type(normalized)
         if detected_type:
@@ -1012,6 +1227,8 @@ def build_raid_attacker_response(
 
     notice = _raid_cache_notice(is_update_running)
     max_body_length = MAX_DISCORD_MESSAGE_LENGTH - len(notice)
+    if route == "specific_eval":
+        return _format_specific_raid_response(query, rows, max_body_length) + notice
     if route.startswith("owned:"):
         return _build_owned_raid_attacker_response(query, rows, route, max_body_length) + notice
     compact_answer = _format_compact_raid_attacker_rows(
@@ -1137,11 +1354,16 @@ def build_contextual_mention_response(
 
     previous_route = infer_raid_attacker_route_from_bot_message(previous_bot_message_content or "")
     previous_dynamax_route = infer_dynamax_route_from_bot_message(previous_bot_message_content or "")
+    previous_specific_subject = _infer_specific_raid_subject_from_bot_message(previous_bot_message_content or "")
     contextual_query = (
         f"Previous bot answer: {previous_bot_message_content}\nUser follow-up: {query}"
         if previous_bot_message_content
         else query
     )
+
+    if previous_specific_subject and _is_specific_raid_followup_without_subject(query):
+        rewritten_query = _inject_subject_into_followup_query(query, previous_specific_subject)
+        return build_mention_response(rewritten_query, is_raid_update_running, is_dynamax_update_running)
 
     if previous_dynamax_route and is_followup_count_request(query):
         requested_count = _requested_row_count(query)

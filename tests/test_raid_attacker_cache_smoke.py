@@ -380,6 +380,62 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
+    def _seed_shadow_reshiram_rankings(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        self._seed_pokemon_mentions("Shadow Reshiram")
+        upsert_raid_attacker_rankings(
+            [
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Mega Blaziken",
+                    "pokemon_type": "fire",
+                    "rank": 1,
+                    "fast_move": "Fire Spin",
+                    "charged_move": "Blast Burn*",
+                    "score": "28.50",
+                    "dps": "32.10",
+                    "scraped_at": scraped_at,
+                },
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Mega Charizard Y",
+                    "pokemon_type": "fire",
+                    "rank": 2,
+                    "fast_move": "Fire Spin",
+                    "charged_move": "Blast Burn*",
+                    "score": "28.20",
+                    "dps": "31.80",
+                    "scraped_at": scraped_at,
+                },
+                {
+                    "source": "test",
+                    "ranking_scope": "type:fire",
+                    "pokemon_name": "Shadow Reshiram",
+                    "pokemon_type": "fire",
+                    "rank": 3,
+                    "fast_move": "Fire Fang",
+                    "charged_move": "Fusion Flare*",
+                    "score": "27.79",
+                    "dps": "31.34",
+                    "scraped_at": scraped_at,
+                },
+                {
+                    "source": "test",
+                    "ranking_scope": "type:dragon",
+                    "pokemon_name": "Mega Rayquaza",
+                    "pokemon_type": "dragon",
+                    "rank": 1,
+                    "fast_move": "Dragon Tail",
+                    "charged_move": "Breaking Swipe",
+                    "score": "35.00",
+                    "dps": "39.50",
+                    "scraped_at": scraped_at,
+                },
+            ]
+        )
+
     def _seed_shiny_wiki(self) -> None:
         scraped_at = datetime.now(timezone.utc).isoformat()
         upsert_wiki_pages(
@@ -831,6 +887,52 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(route, "type:fire")
         self.assertEqual(rows[0]["pokemon_name"], "Fire One")
+
+    def test_specific_shadow_reshiram_strength_query_routes_to_specific_evaluation(self) -> None:
+        self._seed_shadow_reshiram_rankings()
+
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response, route, count = build_mention_response(
+                "shadow reshiram is going to be released soon, how strong of a fire attacker or dragon attacker is it?"
+            )
+
+        self.assertEqual(route, "raid_attackers")
+        self.assertGreaterEqual(count, 1)
+        self.assertIn("Shadow Reshiram", response)
+        self.assertIn("Fire: ranked #3", response)
+        self.assertIn("Score 27.79", response)
+        self.assertIn("DPS 31.34", response)
+        self.assertIn("Dragon: I do not see Shadow Reshiram in the cached Dragon-type top rankings.", response)
+        self.assertNotIn("Top cached Fire-type raid attackers", response)
+
+    def test_specific_shadow_reshiram_investment_query_does_not_return_global_top_list(self) -> None:
+        self._seed_shadow_reshiram_rankings()
+
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response, route, count = build_mention_response("do you recommend me investing in shadow reshiram?")
+
+        self.assertEqual(route, "raid_attackers")
+        self.assertGreaterEqual(count, 1)
+        self.assertIn("Yes — based on the cached Fire rankings, Shadow Reshiram looks like a strong investment", response)
+        self.assertIn("Fire: ranked #3", response)
+        self.assertIn("Fusion Flare*", response)
+        self.assertNotIn("Top cached Fire-type raid attackers", response)
+
+    def test_specific_shadow_reshiram_followup_uses_previous_subject(self) -> None:
+        self._seed_shadow_reshiram_rankings()
+        previous = (
+            "Shadow Reshiram looks strong from the cached raid rankings.\n\n"
+            "Fire: ranked #3 among cached Fire-type raid attackers with Fire Fang / Fusion Flare* — Score 27.79, DPS 31.34.\n"
+            "Source: cached raid attacker rankings."
+        )
+
+        with mock.patch("bot.commands.is_openai_enabled", return_value=False):
+            response, route, count = build_contextual_mention_response("do you recommend investing in it?", previous)
+
+        self.assertEqual(route, "raid_attackers")
+        self.assertGreaterEqual(count, 1)
+        self.assertIn("Shadow Reshiram", response)
+        self.assertNotIn("Top cached Fire-type raid attackers", response)
 
     def test_derived_overall_sorts_by_numeric_score_dps_tdo(self) -> None:
         self._seed_rankings()
