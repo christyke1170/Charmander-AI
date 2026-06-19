@@ -268,6 +268,38 @@ def get_active_events(now: datetime | None = None) -> list[dict[str, Any]]:
     return active
 
 
+def get_active_raid_events(now: datetime | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    """Return raid-related events active right now using explicit start/end bounds.
+
+    For current raid queries we require a concrete date range so future schedule
+    rows or undated/end-only rows do not appear as active today.
+    """
+
+    current = _normalize_datetime(now or datetime.now(timezone.utc))
+    active_events = []
+    for event in _fetch_all(
+        """
+        SELECT * FROM events
+        WHERE start_time IS NOT NULL AND end_time IS NOT NULL
+        ORDER BY
+            CASE WHEN start_time IS NULL THEN 1 ELSE 0 END,
+            start_time ASC,
+            scraped_at DESC
+        """
+    ):
+        event_id = event.get("id")
+        start = _parse_stored_datetime(event.get("start_time"), event_id, "start_time")
+        end = _parse_stored_datetime(event.get("end_time"), event_id, "end_time")
+        if start and end and start <= current <= end:
+            active_events.append(event)
+
+    raid_terms = tuple(term.lower() for term in RAID_TERMS)
+    raid_events = [
+        event for event in active_events if any(term in _event_text(event) for term in raid_terms)
+    ]
+    return raid_events[: max(1, int(limit))]
+
+
 def search_events(query: str, limit: int = 10) -> list[dict[str, Any]]:
     """Search events by title, category, summary, raw text, or URL."""
 

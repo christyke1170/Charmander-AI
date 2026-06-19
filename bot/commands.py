@@ -41,6 +41,7 @@ from ai.raid_attacker_answerer import (
 )
 from config import OPENAI_MODEL, RAID_ATTACKER_CACHE_MAX_AGE_DAYS
 from database.db import (
+    get_active_raid_events,
     get_active_events,
     get_community_day_events,
     get_raid_events,
@@ -1256,7 +1257,13 @@ def route_mention_query(query: str) -> tuple[str, str, list[dict[str, Any]]]:
     """
 
     normalized = query.lower().strip()
-    if _is_current_raid_event_query(normalized) or "raid" in normalized:
+    if _is_current_raid_event_query(normalized):
+        events = get_active_raid_events(limit=10)
+        return "raids", "Here are the raid events active today:", events
+    if "raid" in normalized and any(term in normalized for term in ("this week", "week", "care about", "worth doing", "upcoming", "next", "future", "schedule")):
+        events = get_upcoming_events(limit=10)
+        return "upcoming", "Upcoming Pokémon GO Events", events
+    if "raid" in normalized:
         events = get_raid_events(limit=10)
         return "raids", "Raid-Related Pokémon GO Events", events
     if "community day" in normalized or "comm day" in normalized:
@@ -1268,7 +1275,7 @@ def route_mention_query(query: str) -> tuple[str, str, list[dict[str, Any]]]:
     if "shiny" in normalized:
         events = search_events("shiny", limit=10)
         return "shiny", "Local Events Matching “shiny”", events
-    if any(term in normalized for term in ("this week", "week", "care about", "worth doing", "upcoming", "next")):
+    if any(term in normalized for term in ("this week", "week", "care about", "worth doing", "upcoming", "next", "future", "schedule")):
         events = get_upcoming_events(limit=10)
         return "upcoming", "Upcoming Pokémon GO Events", events
 
@@ -1308,8 +1315,6 @@ def build_mention_response(
                 route,
                 0,
             )
-        if is_openai_enabled():
-            return answer_query_with_llm(query, events)[:MAX_DISCORD_MESSAGE_LENGTH], route, len(events)
         return build_event_response(heading, events, "No matching local raid event data found."), route, len(events)
 
     pokemon_specific = _is_pokemon_specific_query(query)

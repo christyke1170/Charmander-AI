@@ -43,7 +43,7 @@ from bot.commands import (
 )
 from bot.raid_attacker_cache import RaidAttackerCacheManager
 from database.cache_metadata import get_cache_metadata, init_cache_metadata_table, is_cache_stale, update_cache_metadata
-from database.db import init_db, upsert_event
+from database.db import get_active_raid_events, init_db, upsert_event
 from database.egg_pool_db import (
     get_all_egg_pool_sections,
     get_egg_pools_by_distance,
@@ -479,6 +479,21 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    def _seed_named_raid_event(self, title: str, start_iso: str, end_iso: str, summary: str | None = None) -> None:
+        upsert_event(
+            {
+                "source": "test",
+                "title": title,
+                "category": "Raid",
+                "start_time": start_iso,
+                "end_time": end_iso,
+                "url": "https://example.invalid/raids",
+                "summary": summary or title,
+                "raw_text": summary or title,
+                "scraped_at": "2026-06-19T12:00:00+00:00",
+            }
+        )
+
     def _compact_numbered_rows(self, response: str) -> list[str]:
         return [line for line in response.splitlines() if re.match(r"^\d+\. ", line)]
 
@@ -652,12 +667,75 @@ class RaidAttackerCacheSmokeTests(unittest.IsolatedAsyncioTestCase):
         true_queries = [
             "what raids are active rn",
             "what 5-star raids are active",
+            "current raids",
+            "give me current raids",
+            "active raids",
+            "today's raids",
         ]
 
         for query in true_queries:
             with self.subTest(query=query):
                 self.assertTrue(_is_current_raid_event_query(query))
                 self.assertFalse(_is_raid_attacker_query(query))
+
+    def test_current_raid_query_returns_only_active_raid_events_for_fixed_today(self) -> None:
+        fixed_today = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
+        self._seed_named_raid_event(
+            "Shadow Dialga",
+            "2026-06-02T00:00:00+00:00",
+            "2026-06-30T23:59:59+00:00",
+            "Shadow Dialga in raids from June 2 to June 30, 2026.",
+        )
+        self._seed_named_raid_event(
+            "Zekrom",
+            "2026-06-10T00:00:00+00:00",
+            "2026-06-16T23:59:59+00:00",
+            "Zekrom in 5-star Raid Battles — June 10 to June 16, 2026",
+        )
+        self._seed_named_raid_event(
+            "Mega Lopunny",
+            "2026-06-10T00:00:00+00:00",
+            "2026-06-17T23:59:59+00:00",
+            "Mega Lopunny in Mega Raids — June 10 to June 17, 2026",
+        )
+        self._seed_named_raid_event(
+            "Necrozma",
+            "2026-06-17T00:00:00+00:00",
+            "2026-06-23T23:59:59+00:00",
+            "Necrozma in raids from June 17 to June 23, 2026.",
+        )
+        self._seed_named_raid_event(
+            "Celesteela and Kartana",
+            "2026-06-24T00:00:00+00:00",
+            "2026-06-30T23:59:59+00:00",
+            "Celesteela and Kartana in raids from June 24 to June 30, 2026.",
+        )
+
+        with mock.patch("bot.commands.get_active_raid_events", side_effect=lambda limit=10: get_active_raid_events(now=fixed_today, limit=limit)):
+            response, route, count = build_mention_response("give me current raids")
+
+        self.assertEqual(route, "raids")
+        self.assertEqual(count, 2)
+        self.assertIn("## Here are the raid events active today:", response)
+        self.assertIn("Shadow Dialga", response)
+        self.assertIn("Necrozma", response)
+        self.assertNotIn("Zekrom", response)
+        self.assertNotIn("Mega Lopunny", response)
+        self.assertNotIn("Celesteela and Kartana", response)
+
+    def test_upcoming_raids_can_still_include_future_raid_schedule(self) -> None:
+        self._seed_named_raid_event(
+            "Celesteela and Kartana",
+            "2026-06-24T00:00:00+00:00",
+            "2026-06-30T23:59:59+00:00",
+            "Celesteela and Kartana in raids from June 24 to June 30, 2026.",
+        )
+
+        response, route, count = build_mention_response("upcoming raids")
+
+        self.assertEqual(route, "upcoming")
+        self.assertGreaterEqual(count, 1)
+        self.assertIn("Celesteela and Kartana", response)
 
     def test_generic_event_search_detection_requires_event_context_not_generic_chat(self) -> None:
         self.assertFalse(_should_try_generic_event_search("tell me a joke"))
