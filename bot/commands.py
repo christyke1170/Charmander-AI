@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 import re
 from typing import Any
@@ -276,6 +277,16 @@ def _dynamax_cache_notice(is_update_running: bool) -> str:
     return ""
 
 
+def _format_event_date(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
+
+
 def _format_event(event: dict[str, Any]) -> str:
     title = event.get("title") or "Untitled event"
     category = event.get("category")
@@ -288,9 +299,9 @@ def _format_event(event: dict[str, Any]) -> str:
     if category:
         details.append(f"Category: {category}")
     if start:
-        details.append(f"Start: {start}")
+        details.append(f"Start: {_format_event_date(start)}")
     if end:
-        details.append(f"End: {end}")
+        details.append(f"End: {_format_event_date(end)}")
     details.append(f"Source: {source}")
 
     line = f"**{title}**\n" + "\n".join(details)
