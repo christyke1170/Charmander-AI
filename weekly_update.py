@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from config import configure_logging
-from database.db import init_db, upsert_events
-from scraper.leekduck_scraper import scrape_events as scrape_leekduck_events
+from database.db import init_db, should_refresh_event_detail, upsert_event_detail, upsert_events
+from scraper.leekduck_scraper import scrape_event_detail, scrape_events as scrape_leekduck_events
 from scraper.normalize_events import normalize_events
 from scraper.official_pogo_scraper import scrape_events as scrape_official_events
 
@@ -14,7 +15,7 @@ from scraper.official_pogo_scraper import scrape_events as scrape_official_event
 logger = logging.getLogger(__name__)
 
 
-def run_update() -> int:
+def run_update(force: bool = False) -> int:
     """Run all scrapers once and store normalized events.
 
     This is intentionally manual. Discord commands read from SQLite and do not
@@ -35,6 +36,22 @@ def run_update() -> int:
 
     normalized = normalize_events(scraped_events)
     count = upsert_events(normalized)
+
+    for event in normalized:
+        event_url = str(event.get("url") or "").strip()
+        if not event_url or "leekduck.com/events/" not in event_url:
+            continue
+        if not force and not should_refresh_event_detail(event_url):
+            continue
+        try:
+            detail = scrape_event_detail(event_url, event.get("title"))
+        except Exception as exc:
+            logger.exception("Failed to scrape event detail for %s: %s", event_url, exc)
+            continue
+        if detail:
+            upsert_event_detail(detail)
+        time.sleep(1.0)
+
     logger.info("Weekly update complete. Upserted %d event(s).", count)
     return count
 

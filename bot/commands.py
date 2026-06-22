@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import json
 import logging
 import re
 from typing import Any
@@ -42,6 +43,7 @@ from ai.raid_attacker_answerer import (
 )
 from config import OPENAI_MODEL, RAID_ATTACKER_CACHE_MAX_AGE_DAYS
 from database.db import (
+    get_event_detail,
     get_active_raid_events,
     get_active_events,
     get_community_day_events,
@@ -64,6 +66,11 @@ from database.dynamax_attackers_db import (
     search_dynamax_attackers,
 )
 from database.pokemon_db import find_pokemon_mentions, get_pokemon_meta_candidates, search_pokemon_knowledge
+from database.pokemon_go_forms_db import (
+    get_pokemon_go_forms_by_dex,
+    get_pokemon_go_forms_by_name,
+    search_pokemon_go_forms,
+)
 from database.pvp_rankings_db import (
     count_pvp_rankings,
     get_top_pvp_rankings,
@@ -221,12 +228,25 @@ EVENT_TIMING_PATTERN = re.compile(
     r"\b(?:today|active|currently|right\s+now|upcoming|next|this\s+week|weekend|schedule|when)\b",
     re.IGNORECASE,
 )
+REVERSE_UPCOMING_EVENT_PATTERN = re.compile(
+    r"\b(?:furthest\s+out|farthest\s+out|latest\s+first|last\s+first|reverse\s+chronological)\b",
+    re.IGNORECASE,
+)
+NAMED_EVENT_HINT_PATTERN = re.compile(
+    r"\b(?:go\s+fest|pok[eé]mon\s+go\s+fest|community\s+day|comm\s+day|spotlight\s+hour|road\s+of\s+legends|tour|safari\s+zone|wild\s+area|unova|johto|sinnoh|hoenn|galar|paldea)\b",
+    re.IGNORECASE,
+)
 POKEMON_GO_TOPIC_PATTERN = re.compile(
     r"\b(?:pokemon\s+go|pokémon\s+go|community\s+day|comm\s+day|raids?|raid\s+hour|raid\s+day|mega\s+evolution|eggs?|hatch(?:es|ed|ing)?|great\s+league|ultra\s+league|master\s+league|gbl|go\s+battle\s+league|battle\s+league|team\s+go\s+rocket|team\s+rocket|rocket|buddy|routes?|field\s+research|special\s+research|timed\s+research|pokestop|pokéstop|gym|dynamax|gigantamax|max\s+battles?|shiny)\b",
     re.IGNORECASE,
 )
 POKEMON_GO_GENERAL_CHAT_PREFIX = (
     "I don't have that cached yet. I can answer generally, but for Pokémon GO-specific facts I’m more reliable when the wiki/table cache has the topic."
+)
+POKEMON_GO_FORMS_DEX_PATTERN = re.compile(r"\b(?:pokemon|pokémon|dex|pokedex|pokédex)\s*#?\s*(\d{1,4})\b", re.IGNORECASE)
+POKEMON_GO_FORMS_INFO_PATTERN = re.compile(
+    r"\b(?:info|pokedex|pokédex|dex|type|types|move|moves|moveset|what\s+type|what\s+moves|stats|cp)\b",
+    re.IGNORECASE,
 )
 PVP_STOP_WORDS = {
     "a",
@@ -262,6 +282,34 @@ PVP_STOP_WORDS = {
     "ultra",
     "what",
     "which",
+}
+EVENT_QUERY_FILLER_WORDS = {
+    "a",
+    "about",
+    "an",
+    "details",
+    "event",
+    "events",
+    "info",
+    "me",
+    "tell",
+    "the",
+}
+EVENT_FOLLOWUP_SECTION_PATTERN = re.compile(
+    r"\b(?:this\s+event|the\s+event|during\s+this|for\s+this\s+event|that\s+event)\b",
+    re.IGNORECASE,
+)
+EVENT_DETAIL_SECTION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "raids": re.compile(r"\b(?:raids?|super\s+mega\s+raids?|raid\s+bosses?)\b", re.IGNORECASE),
+    "bonuses": re.compile(r"\b(?:bonuses|bonus)\b", re.IGNORECASE),
+    "features": re.compile(r"\b(?:features|highlights?|details?)\b", re.IGNORECASE),
+    "spawns": re.compile(r"\b(?:spawns?|wild\s+encounters?|habitats?)\b", re.IGNORECASE),
+    "incense": re.compile(r"\b(?:incense(?:\s+spawns?|\s+encounters?)?)\b", re.IGNORECASE),
+    "research": re.compile(r"\b(?:research|special\s+research|timed\s+research)\b", re.IGNORECASE),
+    "featured_attacks": re.compile(r"\b(?:featured\s+attacks?|attacks?)\b", re.IGNORECASE),
+    "shiny": re.compile(r"\b(?:shiny|shinies)\b", re.IGNORECASE),
+    "eggs": re.compile(r"\b(?:eggs?|egg\s+spawns?)\b", re.IGNORECASE),
+    "sales": re.compile(r"\b(?:sales?|tickets?|store)\b", re.IGNORECASE),
 }
 
 
@@ -308,6 +356,102 @@ def _format_event(event: dict[str, Any]) -> str:
     if url:
         line += f"\n<{url}>"
     return line
+
+
+def _event_detail_sections(detail: dict[str, Any] | None) -> dict[str, list[str]]:
+    if not detail:
+        return {}
+    raw_sections = detail.get("sections_json")
+    if isinstance(raw_sections, dict):
+        return {
+            str(key): [str(item).strip() for item in value if str(item).strip()]
+            for key, value in raw_sections.items()
+            if isinstance(value, list)
+        }
+    return {}
+
+
+def _event_detail_date_line(event: dict[str, Any]) -> str | None:
+    start = event.get("start_time")
+    end = event.get("end_time")
+    if start and end:
+        return f"Date/Time: {_format_event_date(start)} to {_format_event_date(end)}"
+    if start:
+        return f"Start: {_format_event_date(start)}"
+    if end:
+        return f"End: {_format_event_date(end)}"
+    return None
+
+
+def _section_label(section_key: str) -> str:
+    labels = {
+        "featured_attacks": "Featured attacks",
+        "incense": "Incense encounters",
+        "spawns": "Spawns",
+        "raids": "Raids",
+        "research": "Research",
+        "bonuses": "Bonuses",
+        "features": "Major features",
+        "shiny": "Shiny info",
+        "eggs": "Eggs",
+        "sales": "Sales",
+        "habitats": "Habitats",
+    }
+    return labels.get(section_key, section_key.replace("_", " ").title())
+
+
+def _format_event_detail_section(section_key: str, items: list[str], max_items: int = 8) -> list[str]:
+    if not items:
+        return []
+    lines = [f"{_section_label(section_key)}:"]
+    lines.extend(f"- {item}" for item in items[:max_items])
+    return lines
+
+
+def _detect_requested_event_detail_sections(query: str | None) -> list[str]:
+    normalized = query or ""
+    matches = [key for key, pattern in EVENT_DETAIL_SECTION_PATTERNS.items() if pattern.search(normalized)]
+    if matches:
+        return matches
+    return []
+
+
+def _format_named_event_detail_response(event: dict[str, Any], query: str | None = None) -> str:
+    title = str(event.get("title") or "Untitled event").strip()
+    detail = get_event_detail(event.get("url"))
+    if not detail:
+        return _format_event(event)[:MAX_DISCORD_MESSAGE_LENGTH]
+
+    sections = _event_detail_sections(detail)
+    requested_sections = _detect_requested_event_detail_sections(query)
+    lines = [f"For {title}:"]
+    date_line = _event_detail_date_line(event)
+    if date_line:
+        lines.append(date_line)
+
+    if requested_sections:
+        added_any = False
+        for key in requested_sections:
+            items = sections.get(key, [])
+            if items:
+                lines.append("")
+                lines.extend(_format_event_detail_section(key, items))
+                added_any = True
+        if not added_any and detail.get("summary_text"):
+            lines.append("")
+            lines.append(str(detail.get("summary_text")))
+    else:
+        for key in ("features", "bonuses", "raids", "spawns", "incense", "research"):
+            items = sections.get(key, [])
+            if items:
+                lines.append("")
+                lines.extend(_format_event_detail_section(key, items, max_items=6 if key != "spawns" else 5))
+
+    lines.append("")
+    lines.append("Source: Leek Duck cached event details.")
+    if event.get("url"):
+        lines.append(f"<{event.get('url')}>")
+    return "\n".join(lines)[:MAX_DISCORD_MESSAGE_LENGTH]
 
 
 def build_event_response(heading: str, events: list[dict[str, Any]], empty_message: str) -> str:
@@ -641,6 +785,186 @@ def _is_event_specific_query(query: str) -> bool:
     return any(term in normalized for term in EVENT_QUERY_TERMS)
 
 
+def _normalize_event_match_text(value: str | None) -> str:
+    text = (value or "").lower()
+    text = text.replace("pokémon", "pokemon")
+    text = re.sub(r"\bpokemon\s+go\s+fest\b", "go fest", text)
+    text = re.sub(r"\bcomm\s+day\b", "community day", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _event_query_meaningful_tokens(query: str | None) -> list[str]:
+    normalized = _normalize_event_match_text(query)
+    if not normalized:
+        return []
+    return [token for token in normalized.split() if token and token not in EVENT_QUERY_FILLER_WORDS]
+
+
+def _event_query_search_phrases(query: str) -> list[str]:
+    normalized = _normalize_event_match_text(query)
+    if not normalized:
+        return []
+
+    phrases: list[str] = []
+
+    def add_phrase(value: str) -> None:
+        candidate = _normalize_event_match_text(value)
+        if candidate and candidate not in phrases:
+            phrases.append(candidate)
+
+    add_phrase(normalized)
+    stripped = re.sub(
+        r"\b(?:tell\s+me\s+about|what\s+is|what\s+are|details?\s+(?:for|about)|about|the|a|an|info|details?|event|events|pokemon\s+go)\b",
+        " ",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    add_phrase(stripped)
+    if "go fest" in normalized:
+        add_phrase("go fest")
+        add_phrase(normalized.replace("go fest", "pokemon go fest"))
+        add_phrase(stripped.replace("go fest", "pokemon go fest"))
+        tokens = _event_query_meaningful_tokens(query)
+        year_tokens = [token for token in tokens if re.fullmatch(r"20\d{2}", token)]
+        non_year_tokens = [token for token in tokens if token not in year_tokens]
+        if non_year_tokens:
+            add_phrase(" ".join(non_year_tokens))
+        if year_tokens:
+            add_phrase(f"go fest {' '.join(year_tokens)}")
+            add_phrase(f"go fest {' '.join(non_year_tokens + year_tokens)}")
+            add_phrase(f"go fest {' '.join(year_tokens + [token for token in non_year_tokens if token not in {'go', 'fest'}])}")
+    return phrases
+
+
+def _score_named_event_match(query: str, event: dict[str, Any]) -> tuple[int, int, int, str]:
+    phrases = _event_query_search_phrases(query)
+    meaningful_tokens = _event_query_meaningful_tokens(query)
+    title = _normalize_event_match_text(event.get("title"))
+    category = _normalize_event_match_text(event.get("category"))
+    summary = _normalize_event_match_text(event.get("summary"))
+    raw_text = _normalize_event_match_text(event.get("raw_text"))
+    title_tokens = set(title.split())
+
+    title_score = 0
+    text_score = 0
+    matched_length = 0
+    for phrase in phrases:
+        if not phrase:
+            continue
+        phrase_len = len(phrase)
+        if phrase == title:
+            title_score = max(title_score, 400)
+            matched_length = max(matched_length, phrase_len)
+        elif phrase and phrase in title:
+            title_score = max(title_score, 320)
+            matched_length = max(matched_length, phrase_len)
+
+        phrase_tokens = [token for token in phrase.split() if token]
+        if phrase_tokens and all(token in title.split() for token in phrase_tokens):
+            title_score = max(title_score, 280)
+            matched_length = max(matched_length, phrase_len)
+        if phrase and phrase in category:
+            text_score = max(text_score, 120)
+            matched_length = max(matched_length, phrase_len)
+        if phrase and (phrase in summary or phrase in raw_text):
+            text_score = max(text_score, 80)
+            matched_length = max(matched_length, phrase_len)
+
+    if meaningful_tokens and all(token in title_tokens for token in meaningful_tokens):
+        title_score = max(title_score, 360)
+        matched_length = max(matched_length, len(" ".join(meaningful_tokens)))
+
+    year_bonus = 0
+    year_match = re.search(r"\b(20\d{2})\b", _normalize_event_match_text(query))
+    if year_match and year_match.group(1) in title:
+        year_bonus = 30
+
+    return title_score, text_score + year_bonus, matched_length, title
+
+
+def _lookup_named_event(query: str, limit: int = 1) -> list[dict[str, Any]]:
+    phrases = _event_query_search_phrases(query)
+    if not phrases:
+        return []
+
+    candidates: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for phrase in phrases[:4]:
+        for event in search_events(phrase, limit=10):
+            key = (
+                event.get("id"),
+                event.get("source"),
+                event.get("title"),
+                event.get("start_time"),
+            )
+            candidates[key] = event
+
+    ranked: list[tuple[tuple[int, int, int, str], dict[str, Any]]] = []
+    for event in candidates.values():
+        score = _score_named_event_match(query, event)
+        if score[0] <= 0:
+            continue
+        ranked.append((score, event))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [event for _, event in ranked[: max(1, int(limit))]]
+
+
+def _infer_named_event_from_bot_message(content: str | None) -> dict[str, Any] | None:
+    text = (content or "").strip()
+    if not text:
+        return None
+
+    url_match = re.search(r"<(https?://[^>]+)>", text)
+    if url_match:
+        detail_event = next(iter(search_events(url_match.group(1), limit=1)), None)
+        if detail_event:
+            return detail_event
+
+    title_match = re.search(r"(?:\*\*(.+?)\*\*|^For\s+(.+?):)", text, flags=re.MULTILINE)
+    if title_match:
+        title = title_match.group(1) or title_match.group(2)
+        title = str(title).strip()
+        if title:
+            matches = _lookup_named_event(title, limit=1)
+            if matches:
+                return matches[0]
+    return None
+
+
+def _is_event_detail_followup_query(query: str | None) -> bool:
+    normalized = (query or "").strip()
+    if not normalized:
+        return False
+    return bool(EVENT_FOLLOWUP_SECTION_PATTERN.search(normalized) or _detect_requested_event_detail_sections(normalized))
+
+
+def _sort_upcoming_events(events: list[dict[str, Any]], query: str | None) -> list[dict[str, Any]]:
+    normalized = (query or "").lower()
+    if not normalized:
+        return events
+    if "starting from furthest out" in normalized or REVERSE_UPCOMING_EVENT_PATTERN.search(normalized):
+        return sorted(
+            events,
+            key=lambda event: (
+                event.get("start_time") is None,
+                event.get("start_time") or "",
+                event.get("scraped_at") or "",
+            ),
+            reverse=True,
+        )
+    return events
+
+
+def _should_try_named_event_lookup(query: str) -> bool:
+    normalized = (query or "").strip()
+    if not normalized:
+        return False
+    if _is_current_raid_event_query(normalized) or _is_raid_attacker_query(normalized):
+        return False
+    return bool(NAMED_EVENT_HINT_PATTERN.search(normalized))
+
+
 def _should_try_generic_event_search(query: str) -> bool:
     """Return whether a query should fall through to cached event/news search."""
 
@@ -671,6 +995,184 @@ def _event_cache_miss_message(query: str) -> str:
     if _is_current_raid_event_query(query):
         return "I couldn’t find current local raid event data for that yet. Try `/raids` or run `/update` if you are the bot owner."
     return "I couldn’t find matching local Pokémon GO event data for that yet. Try `/events` to see the latest stored events, or run `/update` if you are the bot owner."
+
+
+def _parse_cached_move_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = [part.strip() for part in text.split("|") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    else:
+        parsed = [value]
+    if not isinstance(parsed, list):
+        parsed = [parsed]
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def _pokemon_go_forms_display_name(row: dict[str, Any]) -> str:
+    name = str(row.get("pokemon_name") or "Unknown Pokémon").strip()
+    form = str(row.get("form") or "").strip()
+    if not form:
+        return name
+    if form.lower() in name.lower():
+        return name
+    return f"{name} ({form})"
+
+
+def _pokemon_go_forms_sort_key(row: dict[str, Any], preferred_name: str | None = None) -> tuple[Any, ...]:
+    name = str(row.get("pokemon_name") or "").strip().lower()
+    form = str(row.get("form") or "").strip().lower()
+    preferred = (preferred_name or "").strip().lower()
+    return (
+        0 if preferred and name == preferred else 1,
+        0 if not form else 1,
+        int(bool(row.get("is_shadow"))),
+        int(bool(row.get("is_mega"))),
+        int(bool(row.get("is_gigantamax"))),
+        row.get("dex_number") or 9999,
+        name,
+        form,
+    )
+
+
+def _best_pokemon_go_forms_row(rows: list[dict[str, Any]], preferred_name: str | None = None) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return sorted(rows, key=lambda row: _pokemon_go_forms_sort_key(row, preferred_name))[0]
+
+
+def format_pokemon_go_forms_row(row: dict[str, Any]) -> str:
+    lines: list[str] = []
+    dex_number = row.get("dex_number")
+    display_name = _pokemon_go_forms_display_name(row)
+    if dex_number:
+        lines.append(f"Pokémon #{dex_number} is {display_name}.")
+    else:
+        lines.append(f"Pokémon GO entry: {display_name}.")
+
+    type_values = [str(row.get("type_1") or "").strip(), str(row.get("type_2") or "").strip()]
+    types = [value for value in type_values if value]
+    if types:
+        lines.append("")
+        lines.append(f"Type: {' / '.join(types)}")
+
+    fast_moves = _parse_cached_move_list(row.get("fast_moves"))
+    if fast_moves:
+        lines.append(f"Fast moves: {', '.join(fast_moves)}")
+
+    charged_moves = _parse_cached_move_list(row.get("charged_moves"))
+    if charged_moves:
+        lines.append(f"Charged moves: {', '.join(charged_moves)}")
+
+    attack = row.get("attack")
+    defense = row.get("defense")
+    stamina = row.get("stamina")
+    if any(value is not None for value in (attack, defense, stamina)):
+        stat_parts: list[str] = []
+        if attack is not None:
+            stat_parts.append(f"{attack} Atk")
+        if defense is not None:
+            stat_parts.append(f"{defense} Def")
+        if stamina is not None:
+            stat_parts.append(f"{stamina} Sta")
+        if stat_parts:
+            lines.append(f"Stats: {' / '.join(stat_parts)}")
+
+    if row.get("max_cp") is not None:
+        lines.append(f"Max CP: {row.get('max_cp')}")
+
+    lines.append("")
+    lines.append("Source: Pokémon GO Hub cached Pokédex.")
+    return "\n".join(lines)[:MAX_DISCORD_MESSAGE_LENGTH]
+
+
+def _extract_pokemon_go_forms_dex_number(query: str | None) -> int | None:
+    match = POKEMON_GO_FORMS_DEX_PATTERN.search(query or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _pokemon_go_forms_name_candidate(query: str | None) -> str | None:
+    text = (query or "").strip()
+    if not text:
+        return None
+
+    try:
+        mentions = find_pokemon_mentions(text, limit=5)
+    except Exception:
+        logger.debug("Could not extract Pokémon mentions for Pokémon GO forms parsing", exc_info=True)
+        mentions = []
+
+    candidates: list[str] = []
+    for mention in mentions:
+        if isinstance(mention, dict):
+            name = mention.get("pokemon_name") or mention.get("name")
+            if name:
+                candidates.append(str(name).strip())
+        elif isinstance(mention, str):
+            candidates.append(mention.strip())
+    if candidates:
+        return max((candidate for candidate in candidates if candidate), key=len, default=None)
+
+    cleaned = re.sub(r"\b(?:pokemon\s+go|pokémon\s+go|give\s+me|tell\s+me|what|which|does|do|is|are|the|a|an|info|pokedex|pokédex|dex|for|on|about|in|type|types|move|moves|moveset|stats|cp|have)\b", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d{1,4}\b", " ", cleaned)
+    cleaned = re.sub(r"[?!.:,;()\[\]{}#/_-]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
+def _should_try_pokemon_go_forms_query(query: str | None) -> bool:
+    normalized = (query or "").lower().strip()
+    if not normalized:
+        return False
+    if _is_dynamax_query(normalized) or _is_raid_attacker_query(normalized) or _is_egg_pool_query(normalized) or _is_pvp_query(normalized):
+        return False
+    if _is_current_raid_event_query(normalized) or _is_wiki_knowledge_query(normalized):
+        return False
+    if _extract_pokemon_go_forms_dex_number(normalized) is not None:
+        return True
+    name_candidate = _pokemon_go_forms_name_candidate(query)
+    if not name_candidate:
+        return False
+    if POKEMON_GO_FORMS_INFO_PATTERN.search(normalized):
+        return True
+    return bool(re.search(r"\b(?:pokemon\s+go|pokémon\s+go)\b", normalized))
+
+
+def _lookup_pokemon_go_forms_row(query: str | None) -> dict[str, Any] | None:
+    dex_number = _extract_pokemon_go_forms_dex_number(query)
+    if dex_number is not None:
+        return _best_pokemon_go_forms_row(get_pokemon_go_forms_by_dex(dex_number))
+
+    candidate = _pokemon_go_forms_name_candidate(query)
+    if not candidate:
+        return None
+
+    rows = get_pokemon_go_forms_by_name(candidate)
+    if not rows:
+        rows = search_pokemon_go_forms(candidate, limit=10)
+    return _best_pokemon_go_forms_row(rows, preferred_name=candidate)
+
+
+def _build_pokemon_go_forms_response(query: str | None) -> str | None:
+    if not _should_try_pokemon_go_forms_query(query):
+        return None
+    row = _lookup_pokemon_go_forms_row(query)
+    if not row:
+        return None
+    return format_pokemon_go_forms_row(row)
 
 
 def _build_general_chat_response(query: str, *, allow_suffix: bool = True) -> str:
@@ -1272,7 +1774,7 @@ def route_mention_query(query: str) -> tuple[str, str, list[dict[str, Any]]]:
         events = get_active_raid_events(limit=10)
         return "raids", "Here are the raid events active today:", events
     if "raid" in normalized and any(term in normalized for term in ("this week", "week", "care about", "worth doing", "upcoming", "next", "future", "schedule")):
-        events = get_upcoming_events(limit=10)
+        events = _sort_upcoming_events(get_upcoming_events(limit=10), query)
         return "upcoming", "Upcoming Pokémon GO Events", events
     if "raid" in normalized:
         events = get_raid_events(limit=10)
@@ -1287,7 +1789,7 @@ def route_mention_query(query: str) -> tuple[str, str, list[dict[str, Any]]]:
         events = search_events("shiny", limit=10)
         return "shiny", "Local Events Matching “shiny”", events
     if any(term in normalized for term in ("this week", "week", "care about", "worth doing", "upcoming", "next", "future", "schedule")):
-        events = get_upcoming_events(limit=10)
+        events = _sort_upcoming_events(get_upcoming_events(limit=10), query)
         return "upcoming", "Upcoming Pokémon GO Events", events
 
     events = search_events(query, limit=10)
@@ -1327,6 +1829,15 @@ def build_mention_response(
                 0,
             )
         return build_event_response(heading, events, "No matching local raid event data found."), route, len(events)
+
+    forms_answer = _build_pokemon_go_forms_response(query)
+    if forms_answer:
+        return forms_answer, "pokemon_go_forms", 1
+
+    if _should_try_named_event_lookup(query):
+        named_events = _lookup_named_event(query, limit=1)
+        if named_events:
+            return _format_named_event_detail_response(named_events[0], query), "named_event", len(named_events)
 
     pokemon_specific = _is_pokemon_specific_query(query)
     event_search_query = _should_try_generic_event_search(query)
@@ -1371,11 +1882,15 @@ def build_contextual_mention_response(
     previous_route = infer_raid_attacker_route_from_bot_message(previous_bot_message_content or "")
     previous_dynamax_route = infer_dynamax_route_from_bot_message(previous_bot_message_content or "")
     previous_specific_subject = _infer_specific_raid_subject_from_bot_message(previous_bot_message_content or "")
+    previous_named_event = _infer_named_event_from_bot_message(previous_bot_message_content or "")
     contextual_query = (
         f"Previous bot answer: {previous_bot_message_content}\nUser follow-up: {query}"
         if previous_bot_message_content
         else query
     )
+
+    if previous_named_event and _is_event_detail_followup_query(query):
+        return _format_named_event_detail_response(previous_named_event, query), "named_event_followup", 1
 
     if previous_specific_subject and _is_specific_raid_followup_without_subject(query):
         rewritten_query = _inject_subject_into_followup_query(query, previous_specific_subject)
@@ -1576,6 +2091,20 @@ def register_commands(
             await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
             return
 
+        forms_answer = await asyncio.to_thread(_build_pokemon_go_forms_response, query)
+        if forms_answer:
+            logger.info("/ask routed to cached Pokémon GO forms for query=%r", query)
+            await interaction.followup.send(forms_answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
+            return
+
+        if _should_try_named_event_lookup(query):
+            named_events = await asyncio.to_thread(_lookup_named_event, query, 1)
+            logger.info("/ask routed to named cached event lookup and returned %d row(s) for query=%r", len(named_events), query)
+            if named_events:
+                answer = _format_named_event_detail_response(named_events[0], query)
+                await interaction.followup.send(answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
+                return
+
         if _is_pokemon_specific_query(query):
             pokemon_rows = get_pokemon_meta_candidates(query, limit=10)
             logger.info("/ask routed to Pokémon knowledge and returned %d row(s) for query=%r", len(pokemon_rows), query)
@@ -1657,6 +2186,12 @@ def register_commands(
             logger.info("/pokemon routed to cached PvPoke rankings and returned %d row(s) for query=%r via route=%s league=%s", len(pvp_rows), query, route, league)
             answer = await asyncio.to_thread(build_pvp_response, query, pvp_rows, route, league)
             await interaction.followup.send(answer, ephemeral=False, suppress_embeds=True)
+            return
+
+        forms_answer = await asyncio.to_thread(_build_pokemon_go_forms_response, query)
+        if forms_answer:
+            logger.info("/pokemon routed to cached Pokémon GO forms for query=%r", query)
+            await interaction.followup.send(forms_answer[:MAX_DISCORD_MESSAGE_LENGTH], ephemeral=False, suppress_embeds=True)
             return
 
         pokemon_rows = get_pokemon_meta_candidates(query, limit=10) or search_pokemon_knowledge(query, limit=10)

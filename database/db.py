@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from contextlib import contextmanager
@@ -53,6 +54,16 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
+EVENT_DETAILS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS event_details (
+    event_url TEXT PRIMARY KEY,
+    event_title TEXT,
+    fetched_at TEXT,
+    summary_text TEXT,
+    sections_json TEXT
+);
+"""
+
 
 @contextmanager
 def get_connection(db_path: Path | None = None):
@@ -77,6 +88,7 @@ def init_db() -> None:
 
     with get_connection() as conn:
         conn.execute(SCHEMA)
+        conn.execute(EVENT_DETAILS_SCHEMA)
     logger.info("Database initialized at %s", DATABASE_PATH)
 
 
@@ -131,6 +143,75 @@ def upsert_events(events: Iterable[dict[str, Any]]) -> int:
         upsert_event(event)
         count += 1
     return count
+
+
+def upsert_event_detail(detail: dict[str, Any]) -> None:
+    """Insert or update cached detail content for one event URL."""
+
+    event_url = str(detail.get("event_url") or "").strip()
+    if not event_url:
+        raise ValueError("Event detail is missing required field: event_url")
+
+    sections = detail.get("sections_json")
+    if isinstance(sections, (dict, list)):
+        sections_json = json.dumps(sections, ensure_ascii=False)
+    else:
+        sections_json = sections
+
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO event_details (
+                event_url, event_title, fetched_at, summary_text, sections_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(event_url) DO UPDATE SET
+                event_title = excluded.event_title,
+                fetched_at = excluded.fetched_at,
+                summary_text = excluded.summary_text,
+                sections_json = excluded.sections_json
+            """,
+            (
+                event_url,
+                detail.get("event_title"),
+                detail.get("fetched_at"),
+                detail.get("summary_text"),
+                sections_json,
+            ),
+        )
+
+
+def get_event_detail(event_url: str | None) -> dict[str, Any] | None:
+    """Return cached detail content for a specific event URL."""
+
+    normalized_url = str(event_url or "").strip()
+    if not normalized_url:
+        return None
+    rows = _fetch_all("SELECT * FROM event_details WHERE event_url = ? LIMIT 1", (normalized_url,))
+    if not rows:
+        return None
+    detail = rows[0]
+    raw_sections = detail.get("sections_json")
+    if isinstance(raw_sections, str) and raw_sections.strip():
+        try:
+            detail["sections_json"] = json.loads(raw_sections)
+        except json.JSONDecodeError:
+            detail["sections_json"] = {}
+    elif not isinstance(raw_sections, dict):
+        detail["sections_json"] = {}
+    return detail
+
+
+def should_refresh_event_detail(event_url: str | None, max_age_hours: int = 24) -> bool:
+    """Return whether a cached detail row is missing or stale enough to refresh."""
+
+    detail = get_event_detail(event_url)
+    if not detail:
+        return True
+    fetched_at = _parse_stored_datetime(detail.get("fetched_at"), field_name="fetched_at")
+    if fetched_at is None:
+        return True
+    age_limit = datetime.now(timezone.utc) - timedelta(hours=max(1, int(max_age_hours)))
+    return fetched_at < age_limit
 
 
 def _fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:

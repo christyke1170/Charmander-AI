@@ -17,8 +17,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config
 import database.db as db_module
-from bot.commands import _is_current_raid_event_query, _is_raid_attacker_query
+from bot.commands import (
+    _build_pokemon_go_forms_response,
+    _is_current_raid_event_query,
+    _is_raid_attacker_query,
+    build_mention_response,
+)
 from database.db import init_db
+from database.pokemon_db import init_pokemon_tables
 from database.pokemon_go_forms_db import (
     count_pokemon_go_forms,
     get_pokemon_go_forms_by_dex,
@@ -87,6 +93,7 @@ class PokemonGoFormsTests(unittest.TestCase):
         self.addCleanup(self.db_patch.stop)
         self.addCleanup(self.db_module_patch.stop)
         init_db()
+        init_pokemon_tables()
         init_pokemon_go_forms_tables()
 
     def test_candidate_url_generation_defaults_to_base_pokedex_order(self) -> None:
@@ -169,6 +176,62 @@ class PokemonGoFormsTests(unittest.TestCase):
         self.assertEqual(len(dex_rows), 2)
         self.assertEqual(search_rows[0]["form"], "Mega X")
         self.assertEqual(json.loads(name_rows[0]["fast_moves"]), ["Fire Spin"])
+
+    def test_forms_cache_routes_name_query_before_general_chat(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        upsert_pokemon_go_forms(
+            [
+                {
+                    "source": "pokemongohub_pokemon_db",
+                    "dex_number": 25,
+                    "pokemon_name": "Pikachu",
+                    "form": None,
+                    "type_1": "Electric",
+                    "fast_moves": ["Thunder Shock", "Quick Attack"],
+                    "charged_moves": ["Wild Charge", "Thunderbolt", "Discharge"],
+                    "attack": 112,
+                    "defense": 96,
+                    "stamina": 111,
+                    "max_cp": 1060,
+                    "url": "https://db.pokemongohub.net/pokemon/25",
+                    "scraped_at": scraped_at,
+                }
+            ]
+        )
+
+        response, route, count = build_mention_response("give me info on pikachu in pokemon go")
+
+        self.assertEqual(route, "pokemon_go_forms")
+        self.assertEqual(count, 1)
+        self.assertIn("Pokémon #25 is Pikachu.", response)
+        self.assertIn("Type: Electric", response)
+        self.assertIn("Fast moves: Thunder Shock, Quick Attack", response)
+        self.assertNotIn("I don't have that cached yet", response)
+
+    def test_forms_cache_routes_dex_query(self) -> None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        upsert_pokemon_go_forms(
+            [
+                {
+                    "source": "pokemongohub_pokemon_db",
+                    "dex_number": 25,
+                    "pokemon_name": "Pikachu",
+                    "form": None,
+                    "type_1": "Electric",
+                    "fast_moves": ["Thunder Shock"],
+                    "charged_moves": ["Wild Charge"],
+                    "url": "https://db.pokemongohub.net/pokemon/25",
+                    "scraped_at": scraped_at,
+                }
+            ]
+        )
+
+        response = _build_pokemon_go_forms_response("give me pokedex info for pokemon 25")
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertIn("Pokémon #25 is Pikachu.", response)
+        self.assertIn("Source: Pokémon GO Hub cached Pokédex.", response)
 
     def test_parser_fixture_extracts_expected_fields(self) -> None:
         row = parse_pokemon_go_hub_form_html(
